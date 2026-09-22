@@ -1,0 +1,63 @@
+schema_version: 1
+flow:
+  name: bnb-wallet-snapshot
+  inputs:
+    - name: host
+      default: https://web3.binance.com/build
+    - name: wallet_address
+    - name: chain_id
+      default: "56"
+  steps:
+    - id: balances
+      name: Read non-risk token balances on BSC
+      request:
+        kind: http
+        method: GET
+        url:
+          concat:
+            - input: host
+            - literal: /api/v1/dex/balance/all-token-balances-by-address?address=
+            - input: wallet_address
+            - literal: '&chains='
+            - input: chain_id
+            - literal: '&excludeRiskToken=true&page=1&pageSize=100'
+      checks:
+        - kind: status
+          equals: 200
+        - kind: jsonpath
+          path: $.code
+          equals: { literal: 0 }
+      exports:
+        - name: assets
+          path: $.data[0].tokenAssets
+    - id: transactions
+      name: Read recent BSC transaction history
+      request:
+        kind: http
+        method: GET
+        url:
+          concat:
+            - input: host
+            - literal: /api/v1/dex/post-transaction/transactions-by-address?address=
+            - input: wallet_address
+            - literal: '&chains='
+            - input: chain_id
+            - literal: '&limit=20'
+      checks:
+        - kind: status
+          equals: 200
+        - kind: jsonpath
+          path: $.code
+          equals: { literal: 0 }
+      exports:
+        - name: transaction_list
+          path: $.data[0].transactionList
+  outputs:
+    - name: wallet_address
+      value: { input: wallet_address }
+    - name: chain_id
+      value: { input: chain_id }
+    - name: assets
+      value: { output: { step: balances, name: assets } }
+    - name: transactions
+      value: { output: { step: transactions, name: transaction_list } }

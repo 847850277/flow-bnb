@@ -16,4 +16,8 @@ jobs:
       - run: cargo +1.90.0 fmt --all -- --check
       - run: cargo +1.90.0 clippy --locked --all-targets -- -D warnings
       - run: cargo +1.90.0 test --locked --all-targets
-      - run: cargo +1.90.0 run --locked -- check flows/rwa_discovery.http.yml
+      - name: Compile every bundled flow
+        run: |
+          for file in flows/*.http.yml; do
+            cargo +1.90.0 run --locked -- check "$file"
+          done

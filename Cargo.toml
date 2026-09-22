@@ -3,6 +3,7 @@ name = "flow-bnb"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
+default-run = "flow-bnb"
 description = "Auditable, declarative transaction workflows for BNB Chain"
 license = "MIT"
 repository = "https://github.com/847850277/flow-bnb"
@@ -14,11 +15,18 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 hmac = "0.12"
-postman-flow = { git = "https://github.com/847850277/postman-gpui", rev = "1580993341763d1d0dce46b37f7950a25a62ad37" }
-postman-http = { git = "https://github.com/847850277/postman-gpui", rev = "1580993341763d1d0dce46b37f7950a25a62ad37" }
-postman-request = { git = "https://github.com/847850277/postman-gpui", rev = "1580993341763d1d0dce46b37f7950a25a62ad37" }
+postman-flow = { git = "https://github.com/847850277/postman-gpui", rev = "a0ab8747d303e5f47070ea4dcd4a5d0ff8ca444a" }
+postman-http = { git = "https://github.com/847850277/postman-gpui", rev = "a0ab8747d303e5f47070ea4dcd4a5d0ff8ca444a" }
+postman-request = { git = "https://github.com/847850277/postman-gpui", rev = "a0ab8747d303e5f47070ea4dcd4a5d0ff8ca444a" }
+rmcp = { version = "3.4", features = ["schemars", "server", "transport-io"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"
 
+[dev-dependencies]
+tempfile = "3"

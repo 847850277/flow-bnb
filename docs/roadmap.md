@@ -9,11 +9,14 @@
 
 ## Milestone 1 — safe transaction preparation
 
-- Query BSC wallet balances and positions.
-- Request aggregated spot quotes and ERC-20 approval transactions.
-- Build and simulate a tokenized-stock swap.
-- Enforce maximum value, price impact, slippage, chain ID, and contract allowlists.
-- Emit a human-readable execution plan before any signature request.
+- [x] Query BSC wallet balances and recent transactions.
+- [x] Request aggregated spot quotes.
+- [x] Build unsigned swap calldata and simulate it before signing.
+- [x] Enforce maximum value, price impact, slippage, chain ID, contract allowlists, simulation,
+  and operator confirmation in a deterministic policy module.
+- [x] Expose templates, policy evaluation, and auditable execution plans through MCP.
+- [ ] Add the optional ERC-20 approval branch when the selected quote requires it.
+- [ ] Persist redacted run reports with request IDs and latency measurements.
 
 ## Milestone 2 — controlled mainnet execution
 
@@ -29,4 +32,3 @@
 - Publish reusable bStocks, Ondo, and xStocks templates.
 - Add rebalancing and market-hours spread-monitor examples.
 - Validate the flows with at least two BNB ecosystem builders.
-

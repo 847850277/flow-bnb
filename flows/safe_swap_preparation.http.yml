@@ -1,0 +1,149 @@
+schema_version: 1
+flow:
+  name: bnb-safe-swap-preparation
+  inputs:
+    - name: host
+      default: https://web3.binance.com/build
+    - name: chain_id
+      default: "56"
+    - name: from_token_address
+    - name: to_token_address
+    - name: amount
+    - name: wallet_address
+    - name: slippage_percent
+      default: "0.5"
+  steps:
+    - id: quote
+      name: Request aggregated spot routes
+      request:
+        kind: http
+        method: GET
+        url:
+          concat:
+            - input: host
+            - literal: /api/v1/dex/aggregator/quote?binanceChainId=
+            - input: chain_id
+            - literal: '&amount='
+            - input: amount
+            - literal: '&fromTokenAddress='
+            - input: from_token_address
+            - literal: '&toTokenAddress='
+            - input: to_token_address
+            - literal: '&userWalletAddress='
+            - input: wallet_address
+      checks:
+        - kind: status
+          equals: 200
+        - kind: jsonpath
+          path: $.code
+          equals: { literal: 0 }
+        - kind: jsonpath
+          path: $.data[0].binanceChainId
+          equals: { input: chain_id }
+      exports:
+        - name: quote_id
+          path: $.data[0].quoteId
+        - name: vendor_name
+          path: $.data[0].vendorName
+        - name: to_token_amount
+          path: $.data[0].toTokenAmount
+        - name: price_impact_percent
+          path: $.data[0].priceImpactPercent
+    - id: build-swap
+      name: Build unsigned swap calldata from the selected route
+      request:
+        kind: http
+        method: GET
+        url:
+          concat:
+            - input: host
+            - literal: /api/v1/dex/aggregator/swap?binanceChainId=
+            - input: chain_id
+            - literal: '&amount='
+            - input: amount
+            - literal: '&fromTokenAddress='
+            - input: from_token_address
+            - literal: '&toTokenAddress='
+            - input: to_token_address
+            - literal: '&userWalletAddress='
+            - input: wallet_address
+            - literal: '&quoteId='
+            - output: { step: quote, name: quote_id }
+            - literal: '&slippagePercent='
+            - input: slippage_percent
+      checks:
+        - kind: status
+          equals: 200
+        - kind: jsonpath
+          path: $.code
+          equals: { literal: 0 }
+      exports:
+        - name: tx_from
+          path: $.data.tx.from
+        - name: tx_to
+          path: $.data.tx.to
+        - name: tx_data
+          path: $.data.tx.data
+          sensitive: true
+        - name: tx_value
+          path: $.data.tx.value
+        - name: min_receive_amount
+          path: $.data.tx.minReceiveAmount
+    - id: simulate
+      name: Simulate the unsigned BSC transaction before signing
+      request:
+        kind: http
+        method: POST
+        url:
+          concat:
+            - input: host
+            - literal: /api/v1/dex/pre-transaction/simulate
+        headers:
+          - name: { literal: Content-Type }
+            value: { literal: application/json }
+        body:
+          kind: json
+          value:
+            object:
+              binanceChainId: { input: chain_id }
+              evmTx:
+                object:
+                  from: { output: { step: build-swap, name: tx_from } }
+                  to: { output: { step: build-swap, name: tx_to } }
+                  value: { output: { step: build-swap, name: tx_value } }
+                  data: { output: { step: build-swap, name: tx_data } }
+      checks:
+        - kind: status
+          equals: 200
+        - kind: jsonpath
+          path: $.code
+          equals: { literal: 0 }
+        - kind: jsonpath
+          path: $.data.status
+          equals: { literal: SUCCESS }
+      exports:
+        - name: simulation_status
+          path: $.data.status
+        - name: balance_changes
+          path: $.data.balanceChanges
+        - name: allowance_changes
+          path: $.data.allowanceChanges
+  outputs:
+    - name: chain_id
+      value: { input: chain_id }
+    - name: quote_id
+      value: { output: { step: quote, name: quote_id } }
+    - name: vendor_name
+      value: { output: { step: quote, name: vendor_name } }
+    - name: to_token_amount
+      value: { output: { step: quote, name: to_token_amount } }
+    - name: price_impact_percent
+      value: { output: { step: quote, name: price_impact_percent } }
+    - name: min_receive_amount
+      value: { output: { step: build-swap, name: min_receive_amount } }
+    - name: simulation_status
+      value: { output: { step: simulate, name: simulation_status } }
+    - name: balance_changes
+      value: { output: { step: simulate, name: balance_changes } }
+    - name: allowance_changes
+      value: { output: { step: simulate, name: allowance_changes } }
