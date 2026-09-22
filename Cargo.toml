@@ -1,0 +1,24 @@
+[package]
+name = "flow-bnb"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "Auditable, declarative transaction workflows for BNB Chain"
+license = "MIT"
+repository = "https://github.com/847850277/flow-bnb"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+hmac = "0.12"
+postman-flow = { git = "https://github.com/847850277/postman-gpui", rev = "1580993341763d1d0dce46b37f7950a25a62ad37" }
+postman-http = { git = "https://github.com/847850277/postman-gpui", rev = "1580993341763d1d0dce46b37f7950a25a62ad37" }
+postman-request = { git = "https://github.com/847850277/postman-gpui", rev = "1580993341763d1d0dce46b37f7950a25a62ad37" }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+url = "2"
+

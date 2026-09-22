@@ -1,0 +1,106 @@
+schema_version: 1
+flow:
+  name: bnb-rwa-discovery
+  inputs:
+    - name: host
+      default: https://web3.binance.com/build
+    - name: ticker
+      default: NVDA
+    - name: platform_id
+      default: ondo
+
+  steps:
+    - id: issuance-platform
+      name: Discover the selected RWA issuance platform
+      request:
+        kind: http
+        method: GET
+        url:
+          concat:
+            - input: host
+            - literal: /api/v1/dex/market/rwa/platforms?platformId=
+            - input: platform_id
+      checks:
+        - kind: status
+          equals: 200
+        - kind: jsonpath
+          path: $.code
+          equals: { literal: 0 }
+      exports:
+        - name: platforms
+          path: $.data
+
+    - id: search-token
+      name: Find a tokenized stock on BSC
+      request:
+        kind: http
+        method: GET
+        url:
+          concat:
+            - input: host
+            - literal: /api/v1/dex/market/rwa/search?keyword=
+            - input: ticker
+            - literal: '&platformId='
+            - input: platform_id
+      checks:
+        - kind: status
+          equals: 200
+        - kind: jsonpath
+          path: $.code
+          equals: { literal: 0 }
+        - kind: jsonpath
+          path: $.data[0].assets[0].binanceChainId
+          equals: { literal: "56" }
+      exports:
+        - name: company_name
+          path: $.data[0].companyName
+        - name: chain_id
+          path: $.data[0].assets[0].binanceChainId
+        - name: contract_address
+          path: $.data[0].assets[0].tokenContractAddress
+        - name: token_symbol
+          path: $.data[0].assets[0].tokenSymbol
+
+    - id: compare-price
+      name: Compare the on-chain token price with its reference price
+      request:
+        kind: http
+        method: GET
+        url:
+          concat:
+            - input: host
+            - literal: /api/v1/dex/market/rwa/price?binanceChainId=
+            - output: { step: search-token, name: chain_id }
+            - literal: '&tokenContractAddresses='
+            - output: { step: search-token, name: contract_address }
+      checks:
+        - kind: status
+          equals: 200
+        - kind: jsonpath
+          path: $.code
+          equals: { literal: 0 }
+      exports:
+        - name: token_price
+          path: $.data[0].tokenPrice
+        - name: reference_price
+          path: $.data[0].referencePrice
+        - name: price_updated_at
+          path: $.data[0].tokenPriceUpdatedAt
+
+  outputs:
+    - name: ticker
+      value: { input: ticker }
+    - name: company_name
+      value: { output: { step: search-token, name: company_name } }
+    - name: token_symbol
+      value: { output: { step: search-token, name: token_symbol } }
+    - name: chain_id
+      value: { output: { step: search-token, name: chain_id } }
+    - name: contract_address
+      value: { output: { step: search-token, name: contract_address } }
+    - name: token_price
+      value: { output: { step: compare-price, name: token_price } }
+    - name: reference_price
+      value: { output: { step: compare-price, name: reference_price } }
+    - name: price_updated_at
+      value: { output: { step: compare-price, name: price_updated_at } }
