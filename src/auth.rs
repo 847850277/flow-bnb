@@ -45,9 +45,23 @@ impl HttpTransport for BinanceWeb3Transport {
     ) -> Result<HttpResponse, HttpError> {
         let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
         sign_request_at(&mut request, &self.api_key, &self.secret_key, &timestamp)?;
+        // Flow logs the request before signing. Describe injected authentication headers
+        // separately without ever passing the key or generated signature to the logger.
+        log_auth_headers(&timestamp);
         // Authentication headers must never follow a redirect to another origin.
         options.redirect_policy = RedirectPolicy::DoNotFollow;
         self.inner.execute(request, options).await
+    }
+}
+
+fn log_auth_headers(timestamp: &str) {
+    for (header, value) in [
+        ("X-OC-APIKEY", "[REDACTED]"),
+        ("X-OC-SIGN", "[REDACTED]"),
+        ("X-OC-TIMESTAMP", timestamp),
+        ("X-OC-RECV-WINDOW", "5000"),
+    ] {
+        tracing::debug!(header, value, "signed request header");
     }
 }
 

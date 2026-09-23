@@ -1,6 +1,7 @@
 mod auth;
 pub mod mcp;
 pub mod policy;
+pub mod receipt;
 
 pub use auth::{sign_request_at, BinanceWeb3Transport};
 pub use mcp::FlowBnbMcpServer;

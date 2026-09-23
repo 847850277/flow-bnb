@@ -1,6 +1,8 @@
 schema_version: 1
+# 用途：查询股票代币的发行平台、合约和价格；这里只读取信息，不买卖代币。
 flow:
   name: bnb-rwa-discovery
+  # 输入：host 为 API 地址，ticker 为股票代码（如 NVDA），platform_id 为发行平台（如 ondo）。
   inputs:
     - name: host
       default: https://web3.binance.com/build
@@ -10,6 +12,8 @@ flow:
       default: ondo
 
   steps:
+    # 第 1 步：查询指定的股票代币发行平台。
+    # 检查 HTTP 状态为 200、业务返回码为 0；提取平台列表，当前后续步骤不引用该列表。
     - id: issuance-platform
       name: Discover the selected RWA issuance platform
       request:
@@ -30,6 +34,9 @@ flow:
         - name: platforms
           path: $.data
 
+    # 第 2 步：在指定平台搜索股票代码，读取第一条结果的第一个链上资产。
+    # 要求这个资产位于 BSC（链 ID 56）；不符合就失败，不会自动遍历其他搜索结果。
+    # 提取公司名、代币符号、链 ID 和合约地址，供下一步查价和最终输出使用。
     - id: search-token
       name: Find a tokenized stock on BSC
       request:
@@ -61,6 +68,8 @@ flow:
         - name: token_symbol
           path: $.data[0].assets[0].tokenSymbol
 
+    # 第 3 步：使用上一步的链 ID 和合约地址，查询代币价格及股票参考价格。
+    # 检查请求和业务码成功，提取两种价格与更新时间；本步骤仅获取价格，不计算价差或触发交易。
     - id: compare-price
       name: Compare the on-chain token price with its reference price
       request:
@@ -87,6 +96,7 @@ flow:
         - name: price_updated_at
           path: $.data[0].tokenPriceUpdatedAt
 
+  # 最终结果：汇总股票、代币合约和价格，供 CLI 或调用方查看。
   outputs:
     - name: ticker
       value: { input: ticker }

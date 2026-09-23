@@ -23,10 +23,12 @@ Reusable engine improvements can move upstream without coupling the core runtime
 - Includes RWA discovery, wallet snapshot, and quote/build/simulate workflows.
 - Applies BSC-only notional, slippage, price-impact, token allowlist, simulation, and confirmation
   gates through a reusable Rust policy type.
-- Exposes five MCP tools for Agent-driven generation, validation, policy evaluation, and execution
-  planning.
-- Stops trade workflows after Binance's Transaction API simulation; the MCP never signs or
+- Exposes six MCP tools for Agent-driven generation, validation, policy evaluation, and execution
+  planning, plus read-only receipt tracking.
+- Stops trade preparation after Binance's Transaction API simulation; the MCP never signs or
   broadcasts.
+- Tracks already-broadcast transactions through a separate JSON-RPC adapter, with bounded Flow
+  loops, chain/receipt validation, confirmation counts, and redacted JSON reports.
 
 ## Quick start
 
@@ -37,6 +39,7 @@ verifies the project with Rust 1.90.
 cargo run --locked -- check flows/rwa_discovery.http.yml
 cargo run --locked -- check flows/wallet_snapshot.http.yml
 cargo run --locked -- check flows/safe_swap_preparation.http.yml
+cargo run --locked -- check flows/transaction_receipt.http.yml
 ```
 
 Create API credentials in the
@@ -51,6 +54,21 @@ cargo run --locked -- run flows/rwa_discovery.http.yml \
   --input ticker=NVDA \
   --input platform_id=ondo
 ```
+
+Add `-v` or `--verbose` to inspect the HTTP flow:
+
+```bash
+cargo run --locked -- run flows/rwa_discovery.http.yml \
+  --input ticker=NVDA --input platform_id=ondo -v
+```
+
+Verbose mode writes HTTP method/URL, request/response headers and bodies, status,
+and timing to stderr. The Binance API key and signature headers are displayed as
+`[REDACTED]`; the secret key is never logged. Flow's sensitive inputs and known
+sensitive outputs use its existing redaction. Response bodies can contain business
+or wallet data, so review logs before sharing. `watch-transaction --verbose` also
+works and keeps its JSON report on stdout; its RPC URL stays redacted. Without the
+flag, the existing output is unchanged.
 
 Use `--env ticker=FLOW_BNB_TICKER` when a flow input should come from an environment variable. This
 keeps sensitive or operational values out of shell history.
@@ -75,6 +93,29 @@ cargo run --locked -- run flows/safe_swap_preparation.http.yml \
   --input slippage_percent=0.5
 ```
 
+## Track an existing transaction
+
+No Binance Web3 credentials or wallet private key are needed. Supply a transaction hash
+already broadcast by your wallet and an HTTP(S) RPC endpoint:
+
+```bash
+export FLOW_BNB_RPC_URL='https://bsc-dataseed.bnbchain.org'
+cargo run --locked -- watch-transaction \
+  --tx-hash 0xYour64HexDigitTransactionHash \
+  --chain-id 56 \
+  --confirmations 3 \
+  --timeout-ms 120000 \
+  --report receipt-report.json
+```
+
+The command prints one JSON report. Only `confirmed` exits successfully; reverted, timeout,
+iteration exhaustion, and RPC errors exit nonzero. `--report` saves the same result for both
+successful and unsuccessful tracking and refuses to overwrite an existing file. Prefer the
+RPC environment variable when a provider key is part of the URL; the URL is omitted from reports.
+
+See [receipt tracking](docs/receipt-tracking.md) for loop limits, MCP arguments, adapter semantics,
+confirmation/reorg behavior, and verification evidence.
+
 ## Agent MCP server
 
 `flow-bnb-mcp` is a domain server built on the official Rust MCP SDK. Start it over stdio with a
@@ -91,6 +132,7 @@ The tools are:
 - `generate_bnb_flow`: returns canonical compiled YAML and can save it below the MCP root.
 - `validate_bnb_flow`: parses and compiles Agent-generated YAML without network access.
 - `evaluate_trade_policy`: returns stable machine-readable violations for a trade intent.
+- `watch_transaction`: runs the bounded read-only receipt flow and returns a structured tracking report.
 - `build_execution_plan`: describes quote, policy, simulation, confirmation, signer, and broadcast
   stages while keeping signing and broadcasting outside the MCP process.
 

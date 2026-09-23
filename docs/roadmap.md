@@ -23,7 +23,8 @@
 - Integrate an isolated wallet signer or Binance Agentic Wallet.
 - Require explicit operator confirmation for irreversible actions.
 - Broadcast a small-value BSC mainnet transaction.
-- Verify the receipt and resulting wallet position.
+- [x] Track an existing transaction: validate chain/receipt, poll with Flow, check canonical block and confirmations, return CLI/MCP reports.
+- [ ] Verify the resulting wallet position and integrate tracking with the future signer/broadcast adapter.
 - Produce a redacted audit report that can be replayed in dry-run mode.
 
 ## Milestone 3 — product and ecosystem proof

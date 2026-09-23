@@ -1,0 +1,76 @@
+schema_version: 1
+# 用途：跟踪一笔已经广播的交易，等待成功确认或返回失败/超时；不发送新交易。
+# 通过 flow-bnb watch-transaction 或 MCP watch_transaction 运行，需要专用回执适配器。
+# 适配器保留 JSON-RPC result，并在本地核对主链区块、计算确认数，添加 tracking 字段。
+# tracking 不是节点原生字段，因此不能直接用普通 HTTP 执行器运行本模板。
+flow:
+  name: bnb-transaction-receipt
+  # 输入：rpc_url 为节点地址（可能含服务商密钥，按敏感值处理），tx_hash 为已广播交易的哈希。
+  # chain_id_hex 默认 0x38，即十进制 56（BSC）；实际确认数目标由 CLI/MCP 参数传给适配器。
+  inputs:
+    - name: rpc_url
+      sensitive: true
+    - name: tx_hash
+    - name: chain_id_hex
+      default: '0x38'
+  steps:
+    # 第 1 步：调用 eth_chainId，确认 RPC 节点连接的是预期链。
+    # 链不匹配或响应异常就停止，避免在错误网络上等待同一个交易哈希。
+    - id: verify-chain
+      request:
+        kind: http
+        method: POST
+        url: {input: rpc_url}
+        headers:
+          - name: {literal: Content-Type}
+            value: {literal: application/json}
+        body:
+          kind: json
+          value:
+            literal: {jsonrpc: '2.0', id: 1, method: eth_chainId, params: []}
+      checks:
+        - kind: status
+          equals: 200
+        - kind: jsonpath
+          path: $.result
+          equals: {input: chain_id_hex}
+    # 第 2 步：重复执行内部的回执查询，默认最多 120 次、轮次之间等 1 秒、总期限 2 分钟。
+    # 达到确认数后成功结束；发现主链上的失败回执就失败，超时或次数用尽也会失败。
+    # 这些循环限额可由 watch-transaction / watch_transaction 的参数覆盖。
+    - id: wait-receipt
+      kind: repeat_until
+      max_iterations: 120
+      interval_ms: 1000
+      timeout_ms: 120000
+      until:
+        eq: [{output: {step: receipt, name: state}}, {literal: confirmed}]
+      fail_when:
+        eq: [{output: {step: receipt, name: state}}, {literal: reverted}]
+      steps:
+        # 每轮查询：调用 eth_getTransactionReceipt，读取这笔交易的最新执行回执。
+        # 回执为 null 表示暂未找到；适配器还会读取链头和对应区块，核对主链归属。
+        # 将本地计算的状态导出给外层循环：pending 等待中，confirming 确认数不足，
+        # confirmed 达到目标确认数，reverted 链上执行失败；回执消失或区块变化会回到等待。
+        - id: receipt
+          request:
+            kind: http
+            method: POST
+            url: {input: rpc_url}
+            headers:
+              - name: {literal: Content-Type}
+                value: {literal: application/json}
+            body:
+              kind: json
+              value:
+                object:
+                  jsonrpc: {literal: '2.0'}
+                  id: {literal: 2}
+                  method: {literal: eth_getTransactionReceipt}
+                  params:
+                    array: [{input: tx_hash}]
+          checks:
+            - kind: status
+              equals: 200
+          exports:
+            - name: state
+              path: $.tracking.state

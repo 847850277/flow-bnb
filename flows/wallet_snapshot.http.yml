@@ -1,6 +1,8 @@
 schema_version: 1
+# 用途：读取指定钱包的代币余额和近期交易；只需要公开的钱包地址，不需要钱包私钥。
 flow:
   name: bnb-wallet-snapshot
+  # 输入：wallet_address 为待查询的钱包地址；chain_id 默认 56，表示 BSC 主网。
   inputs:
     - name: host
       default: https://web3.binance.com/build
@@ -8,6 +10,9 @@ flow:
     - name: chain_id
       default: "56"
   steps:
+    # 第 1 步：查询钱包在指定链上的代币余额，并让 API 排除风险代币。
+    # 当前仅取第 1 页、每页最多 100 条，不会自动翻页；检查 HTTP 200 和业务码 0。
+    # 将响应中的 tokenAssets 保存为 assets，供最终输出使用。
     - id: balances
       name: Read non-risk token balances on BSC
       request:
@@ -30,6 +35,8 @@ flow:
       exports:
         - name: assets
           path: $.data[0].tokenAssets
+    # 第 2 步：查询同一钱包在指定链上的近期交易，最多请求 20 条记录。
+    # 检查 HTTP 200 和业务码 0，提取 transactionList；这是历史列表，不会等待交易确认。
     - id: transactions
       name: Read recent BSC transaction history
       request:
@@ -52,6 +59,7 @@ flow:
       exports:
         - name: transaction_list
           path: $.data[0].transactionList
+  # 最终结果：返回钱包地址、链 ID、资产列表和近期交易列表。
   outputs:
     - name: wallet_address
       value: { input: wallet_address }

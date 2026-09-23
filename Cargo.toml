@@ -12,18 +12,18 @@ repository = "https://github.com/847850277/flow-bnb"
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 hmac = "0.12"
-postman-flow = { git = "https://github.com/847850277/postman-gpui", rev = "a0ab8747d303e5f47070ea4dcd4a5d0ff8ca444a" }
-postman-http = { git = "https://github.com/847850277/postman-gpui", rev = "a0ab8747d303e5f47070ea4dcd4a5d0ff8ca444a" }
-postman-request = { git = "https://github.com/847850277/postman-gpui", rev = "a0ab8747d303e5f47070ea4dcd4a5d0ff8ca444a" }
+postman-flow = { git = "https://github.com/847850277/postman-gpui", rev = "ff26f772a5761a018cfc39b3976b1e49ce850e49" }
+postman-http = { git = "https://github.com/847850277/postman-gpui", rev = "ff26f772a5761a018cfc39b3976b1e49ce850e49" }
+postman-request = { git = "https://github.com/847850277/postman-gpui", rev = "ff26f772a5761a018cfc39b3976b1e49ce850e49" }
 rmcp = { version = "3.4", features = ["schemars", "server", "transport-io"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"

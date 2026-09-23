@@ -1,0 +1,33 @@
+{
+  "flow": "bnb-rwa-discovery",
+  "success": true,
+  "verification": "live authenticated Binance Web3 API, read-only",
+  "steps": [
+    {
+      "step": "issuance-platform",
+      "http_status": 200,
+      "elapsed_ms": 1875
+    },
+    {
+      "step": "search-token",
+      "http_status": 200,
+      "elapsed_ms": 546
+    },
+    {
+      "step": "compare-price",
+      "http_status": 200,
+      "elapsed_ms": 402
+    }
+  ],
+  "http_elapsed_ms_total": 2823,
+  "outputs": {
+    "chain_id": "56",
+    "company_name": "Nvidia Corp",
+    "contract_address": "0xa9ee28c80f960b889dfbd1902055218cba016f75",
+    "reference_price": "228.989645",
+    "ticker": "NVDA",
+    "token_price": "229.382419212880381726",
+    "token_symbol": "NVDAon",
+    "price_updated_at": 1790144984207
+  }
+}

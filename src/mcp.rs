@@ -16,6 +16,8 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::receipt::{watch_transaction, WatchOptions, WatchReport, TRANSACTION_RECEIPT};
+
 use crate::policy::{Evaluation, ExecutionMode, TradeIntent, TradePolicy};
 
 const RWA_DISCOVERY: &str = include_str!("../flows/rwa_discovery.http.yml");
@@ -48,6 +50,7 @@ impl FlowBnbMcpServer {
             FlowTemplate::RwaDiscovery => RWA_DISCOVERY,
             FlowTemplate::WalletSnapshot => WALLET_SNAPSHOT,
             FlowTemplate::SafeSwapPreparation => SAFE_SWAP_PREPARATION,
+            FlowTemplate::TransactionReceipt => TRANSACTION_RECEIPT,
         }
     }
 
@@ -180,6 +183,7 @@ impl FlowBnbMcpServer {
             chain_id: "56".to_owned(),
             network: "BNB Smart Chain mainnet".to_owned(),
             templates: vec![
+                TemplateInfo::new(FlowTemplate::TransactionReceipt, "Track an existing transaction via read-only JSON-RPC with bounded polling and confirmation checks; requires the flow-bnb receipt adapter."),
                 TemplateInfo::new(
                     FlowTemplate::RwaDiscovery,
                     "Discover Ondo, bStocks, or xStocks assets and compare token/reference prices.",
@@ -193,6 +197,7 @@ impl FlowBnbMcpServer {
                     "Quote, build unsigned calldata, and simulate a spot swap without signing or broadcasting.",
                 ),
             ],
+            rpc_methods: vec!["eth_chainId", "eth_getTransactionReceipt", "eth_blockNumber", "eth_getBlockByNumber"].into_iter().map(str::to_owned).collect(),
             official_api_paths: vec![
                 "/api/v1/dex/market/rwa/*".to_owned(),
                 "/api/v1/dex/balance/all-token-balances-by-address".to_owned(),
@@ -201,12 +206,31 @@ impl FlowBnbMcpServer {
                 "/api/v1/dex/pre-transaction/simulate".to_owned(),
             ],
             safety_boundary: vec![
-                "MCP tools never accept or return API secrets or private keys.".to_owned(),
+                "MCP tools never accept Binance API credentials or wallet private keys; receipt reports omit the provider RPC URL.".to_owned(),
                 "Generated trade flows stop after simulation; they do not sign or broadcast.".to_owned(),
                 "Execution policy requires BSC, size/slippage/impact limits, successful simulation, and explicit operator confirmation.".to_owned(),
                 "Use an isolated signer or Binance Agentic Wallet only after policy approval.".to_owned(),
             ],
         })
+    }
+
+    #[tool(
+        name = "watch_transaction",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = true
+        ),
+        description = "Track an already-broadcast transaction via read-only HTTP(S) JSON-RPC. Verify chain ID, canonical receipt block and confirmation count with bounded polling. Returns a structured result for confirmed, reverted, timeout, iteration exhaustion or RPC error. Never signs or broadcasts; no Binance API credentials required. RPC URL may use a provider key but must not contain private keys."
+    )]
+    async fn watch_transaction(
+        &self,
+        Parameters(options): Parameters<WatchOptions>,
+    ) -> Result<Json<WatchReport>, String> {
+        watch_transaction(options)
+            .await
+            .map(Json)
+            .map_err(|error| error.to_string())
     }
 
     #[tool(
@@ -311,7 +335,7 @@ impl ServerHandler for FlowBnbMcpServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("flow-bnb-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Start with list_bnb_capabilities. Generate and validate a template, evaluate the trade policy, then build an execution plan. Never ask for private keys or API secrets. This MCP prepares and simulates trades but does not sign or broadcast them.",
+                "Start with list_bnb_capabilities. Generate and validate a template, evaluate the trade policy, then build an execution plan. Never ask for private keys or API secrets. This MCP prepares and simulates trades and can track an existing transaction with watch_transaction, but does not sign or broadcast.",
             )
     }
 }
@@ -322,6 +346,7 @@ pub enum FlowTemplate {
     RwaDiscovery,
     WalletSnapshot,
     SafeSwapPreparation,
+    TransactionReceipt,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -352,6 +377,7 @@ pub struct Capabilities {
     pub network: String,
     pub templates: Vec<TemplateInfo>,
     pub official_api_paths: Vec<String>,
+    pub rpc_methods: Vec<String>,
     pub safety_boundary: Vec<String>,
 }
 
@@ -431,6 +457,7 @@ mod tests {
             FlowTemplate::RwaDiscovery,
             FlowTemplate::WalletSnapshot,
             FlowTemplate::SafeSwapPreparation,
+            FlowTemplate::TransactionReceipt,
         ] {
             let (_, summary, yaml) =
                 FlowBnbMcpServer::compile_source(FlowBnbMcpServer::template_source(template))

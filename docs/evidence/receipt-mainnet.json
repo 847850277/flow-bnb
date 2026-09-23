@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "success": true,
+  "outcome": "confirmed",
+  "chain_id": 56,
+  "tx_hash": "0x0ea137129bb9a494e70ce1f776906c47cda9f0832c8950f55fbd410f0eae179f",
+  "required_confirmations": 3,
+  "iterations": 1,
+  "elapsed_ms": 3070,
+  "observation": {
+    "state": "confirmed",
+    "confirmations": 398,
+    "block_number": 123515564,
+    "block_hash": "0xd05b2efe7eaf0a43a846cee36dde27b40f0e205ea01bcacc022f80a048e25b7e",
+    "gas_used": "0xca80"
+  },
+  "error": null
+}

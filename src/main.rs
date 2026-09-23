@@ -2,7 +2,10 @@ use std::{collections::HashSet, env, fs, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use flow_bnb::BinanceWeb3Transport;
+use flow_bnb::{
+    receipt::{watch_transaction, WatchOptions},
+    BinanceWeb3Transport,
+};
 use futures::StreamExt;
 use postman_flow::{
     compile_flow, execute_flow, parse_flow_yaml, CompileEnvironment, FlowEvent, FlowInputs,
@@ -16,12 +19,23 @@ use postman_http::request::RequestOptions;
     about = "Run auditable BNB Chain workflows powered by postman-flow"
 )]
 struct Cli {
+    /// Show HTTP method/URL, headers, bodies, status and timing on stderr.
+    #[arg(short, long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Track an already-broadcast transaction through read-only JSON-RPC, without Binance credentials.
+    WatchTransaction {
+        #[command(flatten)]
+        options: WatchOptions,
+        /// Also persist the redacted JSON result to this file (created only if absent).
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
     /// Parse and compile a workflow without sending network requests.
     Check { file: PathBuf },
     /// Execute a workflow against the signed Binance Web3 API.
@@ -44,7 +58,36 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    if cli.verbose {
+        // Restrict debug output to our layers; wire-level dependency logs may contain credentials.
+        tracing_subscriber::fmt()
+            .with_env_filter("warn,postman_flow=debug,flow_bnb=debug")
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .try_init()
+            .map_err(|_| anyhow::anyhow!("could not initialize verbose logging"))?;
+    }
+    match cli.command {
+        Command::WatchTransaction { options, report } => {
+            let result = watch_transaction(options).await?;
+            let json = serde_json::to_string_pretty(&result)?;
+            println!("{json}");
+            if let Some(path) = report {
+                use std::io::Write;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .context("cannot create receipt report (existing files are not overwritten)")?;
+                writeln!(file, "{json}")?;
+                file.sync_all()?;
+            }
+            if !result.success {
+                bail!("transaction tracking ended with {:?}", result.outcome);
+            }
+            Ok(())
+        }
         Command::Check { file } => {
             let plan = load_plan(&file)?;
             println!("OK: {} ({} steps)", plan.name(), plan.step_count());
@@ -156,4 +199,30 @@ fn parse_json_or_string(value: &str) -> serde_json::Value {
 
 fn required_env(name: &str) -> Result<String> {
     env::var(name).with_context(|| format!("required environment variable {name} is not set"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbose_is_accepted_before_and_after_subcommands() {
+        for args in [
+            vec!["flow-bnb", "-v", "run", "flows/rwa_discovery.http.yml"],
+            vec![
+                "flow-bnb",
+                "run",
+                "flows/rwa_discovery.http.yml",
+                "--verbose",
+            ],
+            vec!["flow-bnb", "check", "flows/rwa_discovery.http.yml", "-v"],
+        ] {
+            assert!(Cli::try_parse_from(args).unwrap().verbose);
+        }
+        assert!(
+            !Cli::try_parse_from(["flow-bnb", "check", "flows/rwa_discovery.http.yml"])
+                .unwrap()
+                .verbose
+        );
+    }
 }

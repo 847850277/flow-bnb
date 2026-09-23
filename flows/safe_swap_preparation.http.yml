@@ -1,6 +1,10 @@
 schema_version: 1
+# 用途：获取兑换报价 → 构建未签名交易 → 模拟执行；当前不包含授权、签名或广播。
 flow:
   name: bnb-safe-swap-preparation
+  # 输入：from/to_token_address 是卖出/买入代币的合约；wallet_address 是交易发起钱包。
+  # amount 使用卖出代币的最小单位，例如 6 位小数代币的 1000000 表示 1 枚。
+  # slippage_percent 默认 0.5，表示允许 0.5% 滑点；chain_id 默认 BSC 主网 56。
   inputs:
     - name: host
       default: https://web3.binance.com/build
@@ -13,6 +17,9 @@ flow:
     - name: slippage_percent
       default: "0.5"
   steps:
+    # 第 1 步：向聚合交易 API 查询指定数量的兑换报价，使用返回列表中的第一条路线。
+    # 检查 HTTP 200、业务码 0，并确认报价所属链与输入一致。
+    # 保存报价 ID、交易提供方、预计买入数量和价格影响；报价 ID 将用于构建交易。
     - id: quote
       name: Request aggregated spot routes
       request:
@@ -49,6 +56,9 @@ flow:
           path: $.data[0].toTokenAmount
         - name: price_impact_percent
           path: $.data[0].priceImpactPercent
+    # 第 2 步：沿用上一步报价 ID、代币、数量和钱包，生成未签名的兑换交易。
+    # 同时传入允许的滑点，提取 from/to/data/value 和最低接收数量。
+    # data 是合约调用数据，标记为敏感输出；这里仅构建交易，不会真的兑换。
     - id: build-swap
       name: Build unsigned swap calldata from the selected route
       request:
@@ -89,6 +99,9 @@ flow:
           path: $.data.tx.value
         - name: min_receive_amount
           path: $.data.tx.minReceiveAmount
+    # 第 3 步：把上一步的原始交易字段交给模拟接口，预估执行结果。
+    # 除 HTTP 200 和业务码 0 外，还要求模拟状态为 SUCCESS，否则流程失败。
+    # 提取预计余额和授权额度变化；模拟成功不代表已成交，也不代表独立策略模块已放行。
     - id: simulate
       name: Simulate the unsigned BSC transaction before signing
       request:
@@ -128,6 +141,7 @@ flow:
           path: $.data.balanceChanges
         - name: allowance_changes
           path: $.data.allowanceChanges
+  # 最终结果：返回报价、最低接收数量、模拟状态及预计变化，供后续策略检查和人工确认使用。
   outputs:
     - name: chain_id
       value: { input: chain_id }
