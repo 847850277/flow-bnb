@@ -1,5 +1,7 @@
 # flow-bnb
 
+English | [简体中文](README.zh-CN.md)
+
 Auditable, declarative transaction workflows for BNB Chain, powered by
 [`postman-flow`](https://github.com/847850277/postman-gpui/tree/main/crates/postman-flow).
 
@@ -165,3 +167,21 @@ for file in flows/*.http.yml; do cargo run --locked -- check "$file"; done
 ## License
 
 MIT
+
+## Evidence-bound trade preparation
+
+`prepare-trade` (CLI) and `prepare_trade` (MCP) bind wallet/quote/build/simulation
+responses to local execution policy and persist redacted evidence. Exact-amount
+approvals and an interactive external-wallet handoff are covered by deterministic
+tests. **RFQ stock orders are detected and blocked pending their vendor adapter;
+this is not yet an end-to-end live stock trading demo.**
+
+See [trade execution and current limitations](docs/trade-execution.md) for commands,
+operator policy, signer protocol, tests and remaining submission work.
+
+## Offline wallet and MCP handoff demo
+
+Run `python3 scripts/demo_handoff.py` to queue a simulated trade through the real
+MCP server, review it in the terminal, and exercise the bundled local-development
+wallet adapter plus settlement checks. No private keys or funds are required.
+See [wallet handoff](docs/wallet-handoff.md) for configuration and evidence limits.

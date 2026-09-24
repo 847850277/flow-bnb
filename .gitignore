@@ -3,3 +3,7 @@
 .idea/
 .DS_Store
 
+
+# Operator-local wallet configuration and execution inboxes
+.flow-bnb/
+*.wallet.local.json

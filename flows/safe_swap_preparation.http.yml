@@ -1,4 +1,5 @@
 schema_version: 1
+# Only ordinary SWAP routes; RFQ stock orders require prepare-trade diagnostics.
 # 用途：获取兑换报价 → 构建未签名交易 → 模拟执行；当前不包含授权、签名或广播。
 flow:
   name: bnb-safe-swap-preparation
@@ -47,6 +48,9 @@ flow:
         - kind: jsonpath
           path: $.data[0].binanceChainId
           equals: { input: chain_id }
+        - kind: jsonpath
+          path: $.data[0].executionMode
+          equals: { literal: SWAP }
       exports:
         - name: quote_id
           path: $.data[0].quoteId
@@ -87,6 +91,9 @@ flow:
         - kind: jsonpath
           path: $.code
           equals: { literal: 0 }
+        - kind: jsonpath
+          path: $.data.executionMode
+          equals: { literal: SWAP }
       exports:
         - name: tx_from
           path: $.data.tx.from

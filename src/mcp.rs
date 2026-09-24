@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::receipt::{watch_transaction, WatchOptions, WatchReport, TRANSACTION_RECEIPT};
 
-use crate::policy::{Evaluation, ExecutionMode, TradeIntent, TradePolicy};
+use crate::policy::{Evaluation, TradeIntent, TradePolicy};
 
 const RWA_DISCOVERY: &str = include_str!("../flows/rwa_discovery.http.yml");
 const WALLET_SNAPSHOT: &str = include_str!("../flows/wallet_snapshot.http.yml");
@@ -194,7 +194,7 @@ impl FlowBnbMcpServer {
                 ),
                 TemplateInfo::new(
                     FlowTemplate::SafeSwapPreparation,
-                    "Quote, build unsigned calldata, and simulate a spot swap without signing or broadcasting.",
+                    "Ordinary SWAP routes only: quote, build and simulate; RFQ stock orders require prepare_trade diagnosis.",
                 ),
             ],
             rpc_methods: vec!["eth_chainId", "eth_getTransactionReceipt", "eth_blockNumber", "eth_getBlockByNumber"].into_iter().map(str::to_owned).collect(),
@@ -207,11 +207,102 @@ impl FlowBnbMcpServer {
             ],
             safety_boundary: vec![
                 "MCP tools never accept Binance API credentials or wallet private keys; receipt reports omit the provider RPC URL.".to_owned(),
-                "Generated trade flows stop after simulation; they do not sign or broadcast.".to_owned(),
+                "MCP may queue intents for operator review, but cannot approve them. Generated flows do not sign or broadcast.".to_owned(),
                 "Execution policy requires BSC, size/slippage/impact limits, successful simulation, and explicit operator confirmation.".to_owned(),
                 "Use an isolated signer or Binance Agentic Wallet only after policy approval.".to_owned(),
             ],
         })
+    }
+
+    #[tool(
+        name = "request_trade_execution",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
+        description = "Queue a trade intent for an OPERATOR to review. Does not approve, sign or broadcast. Uses operator-configured FLOW_BNB_HANDOFF_DIR. The operator CLI obtains fresh evidence and requests terminal confirmation; no caller-supplied policy, signer or approval is accepted."
+    )]
+    fn request_trade_execution(
+        &self,
+        Parameters(request): Parameters<crate::trade::TradeRequest>,
+    ) -> Result<Json<crate::handoff::Queued>, String> {
+        execution_inbox()?
+            .enqueue(request)
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+    #[tool(
+        name = "get_trade_execution",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
+        description = "Read a queued trade's durable operator/execution status. Unknown or interrupted outcomes must be inspected, never automatically resubmitted."
+    )]
+    fn get_trade_execution(
+        &self,
+        Parameters(args): Parameters<ExecutionIntentId>,
+    ) -> Result<Json<crate::handoff::Status>, String> {
+        execution_inbox()?
+            .status(&args.intent_id)
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+    #[tool(
+        name = "cancel_trade_execution",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        ),
+        description = "Cancel an unclaimed intent. Cannot cancel a transaction after the operator has claimed it or the wallet has received it."
+    )]
+    fn cancel_trade_execution(
+        &self,
+        Parameters(args): Parameters<ExecutionIntentId>,
+    ) -> Result<Json<crate::handoff::Status>, String> {
+        execution_inbox()?
+            .cancel(&args.intent_id)
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "prepare_trade",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = true
+        ),
+        description = "Read-only evidence-bound trade preparation: wallet, quote-derived risk, approval calldata validation and simulation. Uses operator-configured FLOW_BNB_POLICY_FILE and environment API credentials. Reports RFQ requirements explicitly; never signs or submits."
+    )]
+    async fn prepare_trade(
+        &self,
+        Parameters(request): Parameters<crate::trade::TradeRequest>,
+    ) -> Result<Json<crate::trade::TradeReport>, String> {
+        let path = std::env::var("FLOW_BNB_POLICY_FILE")
+            .map_err(|_| "operator must configure FLOW_BNB_POLICY_FILE")?;
+        let policy =
+            serde_json::from_slice(&fs::read(path).map_err(|_| "cannot read operator policy")?)
+                .map_err(|_| "invalid operator policy")?;
+        let key = std::env::var("BINANCE_WEB3_API_KEY").map_err(|_| "API key not configured")?;
+        let secret =
+            std::env::var("BINANCE_WEB3_SECRET_KEY").map_err(|_| "API secret not configured")?;
+        let api = crate::BinanceWeb3Transport::new(key, secret)
+            .map_err(|_| "cannot initialize API transport")?;
+        let api = crate::trade::BalanceFallback {
+            api,
+            rpc: postman_request::RequestClient::try_new("flow-bnb-balance")
+                .map_err(|_| "cannot initialize RPC transport")?,
+            rpc_url: std::env::var("FLOW_BNB_RPC_URL").ok(),
+        };
+        Ok(Json(
+            crate::trade::prepare_with_transport(request, policy, api)
+                .await
+                .into_report(),
+        ))
     }
 
     #[tool(
@@ -292,8 +383,8 @@ impl FlowBnbMcpServer {
         Parameters(arguments): Parameters<EvaluatePolicyArguments>,
     ) -> Json<ExecutionPlan> {
         let evaluation = arguments.policy.evaluate(&arguments.intent);
-        let can_handoff_to_signer =
-            arguments.intent.mode == ExecutionMode::Execute && evaluation.allowed;
+        // This caller-supplied intent is advisory, never an execution capability.
+        let can_handoff_to_signer = false;
         Json(ExecutionPlan {
             intent: arguments.intent,
             policy: arguments.policy,
@@ -444,6 +535,17 @@ impl PlanStage {
             executor: executor.into(),
         }
     }
+}
+
+fn execution_inbox() -> Result<crate::handoff::Inbox, String> {
+    let path = std::env::var("FLOW_BNB_HANDOFF_DIR")
+        .map_err(|_| "operator must configure FLOW_BNB_HANDOFF_DIR")?;
+    crate::handoff::Inbox::open(path).map_err(|e| e.to_string())
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionIntentId {
+    pub intent_id: String,
 }
 
 #[cfg(test)]

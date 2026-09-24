@@ -21,3 +21,9 @@ jobs:
           for file in flows/*.http.yml; do
             cargo +1.90.0 run --locked -- check "$file"
           done
+      - name: Offline MCP and operator wallet handoff
+        run: |
+          cargo +1.90.0 build --locked --bins
+          for scenario in success decline wallet-reject timeout expired wrong-chain cancel; do
+            python3 scripts/demo_handoff.py --self-test --no-build --scenario "$scenario"
+          done

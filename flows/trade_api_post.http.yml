@@ -1,0 +1,33 @@
+schema_version: 1
+# Internal stage used by prepare-trade. The Rust adapter validates endpoints and
+# binds API evidence to policy before a signing action can be produced.
+flow:
+  name: bnb-trade-api-post
+  inputs:
+    - name: url
+    - name: body
+  steps:
+    - id: request
+      request:
+        kind: http
+        method: POST
+        url: { input: url }
+        headers:
+          - name: { literal: Content-Type }
+            value: { literal: application/json }
+        body:
+          kind: json
+          value: { input: body }
+      checks:
+        - kind: status
+          equals: 200
+        - kind: jsonpath
+          path: $.code
+          equals: { literal: 0 }
+      exports:
+        - name: data
+          path: $.data
+          sensitive: true
+  outputs:
+    - name: data
+      value: { output: { step: request, name: data } }

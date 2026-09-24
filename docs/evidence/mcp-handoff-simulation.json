@@ -1,0 +1,145 @@
+{
+  "mode": "SIMULATION_ONLY",
+  "scenario": "success",
+  "mcp_status": {
+    "id": "f02c375acde3e602d6b60b6ef07983749e9ec98c3c05836363ba3a35816bb927",
+    "message": "Wallet submission and settlement checks completed. This bundled adapter targets a local development node.",
+    "result": {
+      "buy_delta": "1000000",
+      "evidence_kind": "simulation",
+      "receipt_success": true,
+      "sell_delta": "-5000000000000000000",
+      "tx_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "state": "completed_simulation",
+    "updated_at": "2026-09-23T07:56:38.738401+00:00"
+  },
+  "mock_submissions": 1,
+  "rpc_methods": [
+    "web3_clientVersion",
+    "eth_chainId",
+    "eth_accounts",
+    "eth_estimateGas",
+    "eth_gasPrice",
+    "eth_sendTransaction",
+    "eth_chainId",
+    "eth_getTransactionByHash",
+    "eth_chainId",
+    "eth_getTransactionReceipt",
+    "eth_blockNumber",
+    "eth_getBlockByNumber"
+  ],
+  "audit": {
+    "execution": "confirmed_balances_observed",
+    "mode": "simulation",
+    "preparation": {
+      "balance_sources": {
+        "buy": "wallet_api",
+        "sell": "wallet_api"
+      },
+      "blockers": [],
+      "buy_balance": "0",
+      "confirmation_id": "723c7bb80955dd1dccaf3529a468002086b7fb9b9a2c2a314676119610adb620",
+      "created_at": "2026-09-23T07:56:38.367132+00:00",
+      "max_age_seconds": 30,
+      "policy_sha256": "50c59e62476f3ad9991811bfadbdc2c2f9ed5df169ad87d40903afbbf841750a",
+      "quote": {
+        "buy_amount": "1000000",
+        "execution_mode": "SWAP",
+        "notional_usd": "5",
+        "price_impact_bps": 1,
+        "quote_id": "simulated-quote",
+        "sell_amount": "5000000000000000000",
+        "sell_token_decimals": 18,
+        "sell_token_usd_price": "1",
+        "vendor": "SIMULATED"
+      },
+      "request": {
+        "amount": "5000000000000000000",
+        "from_token_address": "0x2222222222222222222222222222222222222222",
+        "slippage_bps": 50,
+        "to_token_address": "0x3333333333333333333333333333333333333333",
+        "wallet_address": "0x1111111111111111111111111111111111111111"
+      },
+      "rfq_payload_sha256": null,
+      "schema_version": 1,
+      "sell_balance": "10000000000000000000",
+      "simulation_status": "SUCCESS",
+      "stages": [
+        {
+          "business_code": 0,
+          "elapsed_ms": 0,
+          "http_status": 200,
+          "response_sha256": "aa314aaa2121ba28e15db483bcf0f56541c4db60567f0dc99e35e897e2829b71",
+          "stage": "wallet",
+          "success": true
+        },
+        {
+          "business_code": 0,
+          "elapsed_ms": 0,
+          "http_status": 200,
+          "response_sha256": "506689418aff1b71e81f98c916bb18df07f64d68ca112637220465fa4c8b2d0d",
+          "stage": "quote",
+          "success": true
+        },
+        {
+          "business_code": 0,
+          "elapsed_ms": 0,
+          "http_status": 200,
+          "response_sha256": "9233a6f2b9b7499acb6283f7f8fdb25696a806d05c6447e208231ecbe5fbd1dc",
+          "stage": "build",
+          "success": true
+        },
+        {
+          "business_code": 0,
+          "elapsed_ms": 0,
+          "http_status": 200,
+          "response_sha256": "5e1a2c6401275a04de575acc75ee40e23bd733bc3e39fa0b63d39f7053d19bb6",
+          "stage": "simulate",
+          "success": true
+        }
+      ],
+      "state": "swap_ready",
+      "transaction": {
+        "approval_amount": null,
+        "calldata_sha256": "62a0b4457b8bcff7283cccb5b0c163357487231a35e13665edc43e5709fc8f96",
+        "chain_id": 56,
+        "from": "0x1111111111111111111111111111111111111111",
+        "kind": "swap",
+        "spender": null,
+        "to": "0x4444444444444444444444444444444444444444",
+        "value": "0"
+      }
+    },
+    "settlement": {
+      "buy_balance_after": "1000000",
+      "buy_delta": "1000000",
+      "confirmation_id": "723c7bb80955dd1dccaf3529a468002086b7fb9b9a2c2a314676119610adb620",
+      "errors": [],
+      "receipt": {
+        "chain_id": 56,
+        "elapsed_ms": 3,
+        "error": null,
+        "iterations": 1,
+        "observation": {
+          "block_hash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "block_number": 16,
+          "confirmations": 3,
+          "gas_used": "0x186a0",
+          "state": "confirmed"
+        },
+        "outcome": "confirmed",
+        "required_confirmations": 3,
+        "schema_version": 1,
+        "success": true,
+        "tx_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "schema_version": 1,
+      "sell_balance_after": "5000000000000000000",
+      "sell_delta": "-5000000000000000000",
+      "state": "confirmed_balances_observed",
+      "tx_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "tx_hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

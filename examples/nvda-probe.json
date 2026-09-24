@@ -1,0 +1,7 @@
+{
+  "wallet_address": "0x1111111111111111111111111111111111111111",
+  "from_token_address": "0x55d398326f99059fF775485246999027B3197955",
+  "to_token_address": "0xa9ee28c80f960b889dfbd1902055218cba016f75",
+  "amount": "6000000000000000000",
+  "slippage_bps": 50
+}

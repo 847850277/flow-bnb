@@ -1,0 +1,64 @@
+{
+  "execution": "not_requested",
+  "preparation": {
+    "blockers": [
+      "wallet API omitted a requested token balance; unknown is not zero",
+      "swap router is not in local allowlist"
+    ],
+    "buy_balance": null,
+    "confirmation_id": null,
+    "created_at": "2026-09-23T07:00:57.307544+00:00",
+    "max_age_seconds": 30,
+    "policy_sha256": "ae08e7f6a76b3c327af38ca66dfce1bd83b23ecf6d8d12e84b82fdaccc92abf2",
+    "quote": {
+      "buy_amount": "26199787046994210",
+      "execution_mode": "SWAP",
+      "notional_usd": "5.9990789911709064",
+      "price_impact_bps": 1,
+      "quote_id": "2a71d507a8c94c5f8398490693353b92",
+      "sell_amount": "6000000000000000000",
+      "sell_token_decimals": 18,
+      "sell_token_usd_price": "0.9998464985284844",
+      "vendor": "LiquidMesh"
+    },
+    "request": {
+      "amount": "6000000000000000000",
+      "from_token_address": "0x55d398326f99059fF775485246999027B3197955",
+      "slippage_bps": 50,
+      "to_token_address": "0xa9ee28c80f960b889dfbd1902055218cba016f75",
+      "wallet_address": "0x1111111111111111111111111111111111111111"
+    },
+    "rfq_payload_sha256": null,
+    "schema_version": 1,
+    "sell_balance": "359727229276298158350",
+    "simulation_status": null,
+    "stages": [
+      {
+        "business_code": 0,
+        "elapsed_ms": 1878,
+        "http_status": 200,
+        "response_sha256": "a2b3823a20a8ba918d9e3f3258786711b4f99d629aeb0feb18416fba8a36563e",
+        "stage": "wallet",
+        "success": true
+      },
+      {
+        "business_code": 0,
+        "elapsed_ms": 618,
+        "http_status": 200,
+        "response_sha256": "3eefab16f86553b5b89fbe36f5d88e5e9779fdc1568b0547255feeb75598219b",
+        "stage": "quote",
+        "success": true
+      },
+      {
+        "business_code": 0,
+        "elapsed_ms": 412,
+        "http_status": 200,
+        "response_sha256": "db44684633dfc1f91e999b9a3586a2dd4fb09888d8babd0f54658068041f9876",
+        "stage": "build",
+        "success": true
+      }
+    ],
+    "state": "blocked",
+    "transaction": null
+  }
+}

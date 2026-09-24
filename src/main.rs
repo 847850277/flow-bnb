@@ -28,6 +28,50 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect and execute one queued intent after fresh preparation and terminal confirmation.
+    ApproveTrade {
+        #[arg(long, env = "FLOW_BNB_HANDOFF_DIR")]
+        handoff_dir: PathBuf,
+        #[arg(long)]
+        intent_id: String,
+        #[arg(long)]
+        policy: PathBuf,
+        /// Configuration for the bundled local development-node wallet adapter.
+        #[arg(long)]
+        wallet_config: PathBuf,
+        /// Use deterministic API fixtures; wallet endpoint must still be a loopback dev node.
+        #[arg(long)]
+        demo: bool,
+    },
+    /// Review a queued intent and its durable status without executing it.
+    ReviewTrade {
+        #[arg(long, env = "FLOW_BNB_HANDOFF_DIR")]
+        handoff_dir: PathBuf,
+        #[arg(long)]
+        intent_id: String,
+    },
+    /// Read-only wallet, quote, policy, approval and simulation diagnosis.
+    PrepareTrade {
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        policy: PathBuf,
+        #[arg(long)]
+        report: PathBuf,
+    },
+    /// Prepare anew, confirm on the terminal, then hand off one transaction to a trusted wallet.
+    ExecuteTrade {
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        policy: PathBuf,
+        #[arg(long)]
+        report: PathBuf,
+        #[arg(long)]
+        signer: PathBuf,
+        #[arg(long, env = "FLOW_BNB_RPC_URL")]
+        rpc_url: String,
+    },
     /// Track an already-broadcast transaction through read-only JSON-RPC, without Binance credentials.
     WatchTransaction {
         #[command(flatten)]
@@ -69,6 +113,87 @@ async fn main() -> Result<()> {
             .map_err(|_| anyhow::anyhow!("could not initialize verbose logging"))?;
     }
     match cli.command {
+        Command::ReviewTrade {
+            handoff_dir,
+            intent_id,
+        } => {
+            let inbox = flow_bnb::handoff::Inbox::open(handoff_dir)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"intent":inbox.intent(&intent_id)?,"status":inbox.status(&intent_id)?})
+                )?
+            );
+            Ok(())
+        }
+        Command::ApproveTrade {
+            handoff_dir,
+            intent_id,
+            policy,
+            wallet_config,
+            demo,
+        } => {
+            let config: flow_bnb::wallet::DevWalletConfig =
+                serde_json::from_slice(&fs::read(&wallet_config)?)?;
+            config.validate()?;
+            // Check operator terminal and trusted adapter BEFORE permanently claiming the intent.
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+                .context("approval requires an operator terminal")?;
+            let executable = std::env::current_exe()?.with_file_name("flow-bnb-wallet-rpc");
+            anyhow::ensure!(
+                executable.is_file(),
+                "build flow-bnb-wallet-rpc before approval"
+            );
+            let inbox = flow_bnb::handoff::Inbox::open(handoff_dir)?;
+            let mut claim = inbox.claim(&intent_id)?;
+            let request = claim.intent.request.clone();
+            let audit_path = claim.audit_path.clone();
+            let args = vec![
+                "--config".into(),
+                wallet_config.canonicalize()?.to_string_lossy().into_owned(),
+            ];
+            let result = trade_request_command(
+                request,
+                policy,
+                audit_path.clone(),
+                Some((executable, config.rpc_url, args)),
+                demo,
+                Some(&mut claim),
+            )
+            .await;
+            if result.is_err() {
+                // The durable journal is written BEFORE wallet handoff. An unreadable
+                // audit after a disk/process failure must never imply no submission.
+                let phase = inbox
+                    .status(&intent_id)
+                    .map(|s| s.state)
+                    .unwrap_or_default();
+                let state = if matches!(phase.as_str(), "preparing" | "awaiting_confirmation") {
+                    "not_submitted"
+                } else {
+                    "needs_attention_outcome_may_be_unknown"
+                };
+                claim.record(state,"Execution did not complete; inspect the audit. A claimed intent cannot be replayed.")?;
+            } else {
+                claim.record(if demo {"completed_simulation"} else {"completed_dev_node"},"Wallet submission and settlement checks completed. This bundled adapter targets a local development node.")?;
+            }
+            result
+        }
+        Command::PrepareTrade {
+            request,
+            policy,
+            report,
+        } => trade_command(request, policy, report, None).await,
+        Command::ExecuteTrade {
+            request,
+            policy,
+            report,
+            signer,
+            rpc_url,
+        } => trade_command(request, policy, report, Some((signer, rpc_url))).await,
         Command::WatchTransaction { options, report } => {
             let result = watch_transaction(options).await?;
             let json = serde_json::to_string_pretty(&result)?;
@@ -199,6 +324,152 @@ fn parse_json_or_string(value: &str) -> serde_json::Value {
 
 fn required_env(name: &str) -> Result<String> {
     env::var(name).with_context(|| format!("required environment variable {name} is not set"))
+}
+
+async fn trade_command(
+    request_path: PathBuf,
+    policy_path: PathBuf,
+    report_path: PathBuf,
+    execution: Option<(PathBuf, String)>,
+) -> Result<()> {
+    let request = serde_json::from_slice(&fs::read(request_path)?)?;
+    trade_request_command(
+        request,
+        policy_path,
+        report_path,
+        execution.map(|(path, url)| (path, url, vec![])),
+        false,
+        None,
+    )
+    .await
+}
+
+type WalletExecution = (PathBuf, String, Vec<String>);
+async fn trade_request_command(
+    request: flow_bnb::trade::TradeRequest,
+    policy_path: PathBuf,
+    report_path: PathBuf,
+    execution: Option<WalletExecution>,
+    demo: bool,
+    mut claim: Option<&mut flow_bnb::handoff::Claim>,
+) -> Result<()> {
+    use flow_bnb::trade::{
+        invoke_signer_with_args, prepare_with_transport, verify_settlement, ExecutionPolicy,
+    };
+    use std::io::{BufRead, Seek, SeekFrom, Write};
+    let policy: ExecutionPolicy = serde_json::from_slice(&fs::read(policy_path)?)?;
+    // Reserve the audit destination before network I/O or wallet handoff.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&report_path)
+        .context("report already exists or cannot be created")?;
+    let api = if demo {
+        println!("SIMULATION ONLY: fixture market data and local development wallet; no mainnet evidence.");
+        TradeTransport::Demo(flow_bnb::demo::DemoApi::default())
+    } else {
+        let api = BinanceWeb3Transport::new(
+            required_env("BINANCE_WEB3_API_KEY")?,
+            required_env("BINANCE_WEB3_SECRET_KEY")?,
+        )?;
+        let rpc_url = execution
+            .as_ref()
+            .map(|(_, url, _)| url.clone())
+            .or_else(|| env::var("FLOW_BNB_RPC_URL").ok());
+        TradeTransport::Live(flow_bnb::trade::BalanceFallback {
+            api,
+            rpc: postman_request::RequestClient::try_new("flow-bnb-balance")?,
+            rpc_url,
+        })
+    };
+    let prepared = prepare_with_transport(request, policy, api.clone()).await;
+    let report = prepared.report().clone();
+    let mut audit = serde_json::json!({"mode":if demo {"simulation"} else {"live_api"},"preparation":report,"execution":"not_requested"});
+    fn save(file: &mut fs::File, audit: &serde_json::Value) -> Result<()> {
+        file.seek(SeekFrom::Start(0))?;
+        serde_json::to_writer_pretty(&mut *file, audit)?;
+        let length = file.stream_position()?;
+        file.set_len(length)?;
+        file.sync_all()?;
+        Ok(())
+    }
+    save(&mut file, &audit)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    if let Some((signer, rpc_url, signer_args)) = execution {
+        if !prepared.ready() {
+            bail!("preparation blocked; no signer was invoked");
+        }
+        if let Some(claim) = claim.as_deref_mut() {
+            claim.record("awaiting_confirmation","Fresh preparation completed; operator must confirm the exact action before it expires.")?;
+        }
+        // No --yes flag or MCP boolean: confirmation must come from the operator's terminal.
+        let mut terminal = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .context("execution requires an interactive operator terminal")?;
+        writeln!(terminal,"Review the transaction above. Type its complete confirmation_id to submit this ONE transaction:")?;
+        terminal.flush()?;
+        let mut confirmation = String::new();
+        std::io::BufReader::new(terminal).read_line(&mut confirmation)?;
+        let signer_request = prepared.authorize(confirmation.trim())?;
+        audit["execution"] = serde_json::json!("handoff_started_outcome_unknown_until_verified");
+        save(&mut file, &audit)?;
+        if let Some(claim) = claim.as_deref_mut() {
+            claim.record(
+                "handoff_started_outcome_unknown",
+                "Operator confirmed; wallet submission may occur. Do not replay this intent.",
+            )?;
+        }
+        let response = match invoke_signer_with_args(&signer, &signer_args, &signer_request).await {
+            Ok(response) => response,
+            Err(error) => {
+                audit["execution"] = serde_json::json!("handoff_failed_or_unknown");
+                audit["error"] = serde_json::json!(error.to_string());
+                save(&mut file, &audit)?;
+                return Err(error);
+            }
+        };
+        audit["tx_hash"] = serde_json::json!(response.tx_hash);
+        save(&mut file, &audit)?;
+        if let Some(claim) = claim {
+            claim.record(
+                "submitted_verifying",
+                "Wallet returned a transaction hash; checking payload and settlement.",
+            )?;
+        }
+        let rpc = postman_request::RequestClient::try_new("flow-bnb-settlement")?;
+        let settlement =
+            verify_settlement(&report, &signer_request, &response, &rpc_url, api, rpc).await;
+        audit["execution"] = serde_json::json!(settlement.state);
+        audit["settlement"] = serde_json::to_value(&settlement)?;
+        save(&mut file, &audit)?;
+        println!("{}", serde_json::to_string_pretty(&settlement)?);
+        if !settlement.errors.is_empty() {
+            bail!("settlement needs attention; inspect report before retrying");
+        }
+    } else if !report.blockers.is_empty() {
+        bail!("preparation blocked; see report");
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+enum TradeTransport {
+    Live(flow_bnb::trade::BalanceFallback<BinanceWeb3Transport, postman_request::RequestClient>),
+    Demo(flow_bnb::demo::DemoApi),
+}
+impl postman_http::HttpTransport for TradeTransport {
+    async fn execute(
+        &self,
+        request: postman_http::request::Request,
+        options: RequestOptions,
+    ) -> Result<postman_http::HttpResponse, postman_http::HttpError> {
+        match self {
+            Self::Live(t) => t.execute(request, options).await,
+            Self::Demo(t) => t.execute(request, options).await,
+        }
+    }
 }
 
 #[cfg(test)]

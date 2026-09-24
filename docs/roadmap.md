@@ -33,3 +33,30 @@
 - Publish reusable bStocks, Ondo, and xStocks templates.
 - Add rebalancing and market-hours spread-monitor examples.
 - Validate the flows with at least two BNB ecosystem builders.
+
+## Evidence-bound preparation update
+
+- [x] CLI/MCP preparation uses actual API evidence and operator-local policy.
+- [x] Quote-derived notional with exact arithmetic; build/identity/risk validation.
+- [x] Exact-amount approval validation and simulation (single approval only).
+- [x] Redacted per-stage HTTP/business status, latency and response digests.
+- [x] Interactive, expiring confirmation bound to the exact prepared action.
+- [x] External signer process protocol; submitted payload verification, receipt and
+  balance observations tested with mocks. No bundled production wallet adapter yet.
+- [x] Ordinary SWAP template explicitly rejects RFQ routes.
+- [ ] RFQ vendor-specific typed-data validation and order simulation/validation.
+- [ ] Actual wallet integration, RFQ submission and settlement monitoring.
+- [ ] Authorized small mainnet stock trade and recorded demonstration.
+- [ ] Publish reviewed repository and human-authored developer experience report.
+
+The checkboxes in earlier milestones describe components, not live verification.
+See `docs/trade-execution.md` and `docs/evidence/` for the current evidence boundary.
+
+## Local wallet handoff update
+
+- [x] Loopback development-node JSON-RPC wallet adapter with gas/fee/account/chain gates.
+- [x] MCP durable intent queue, status and cancellation; independent terminal confirmation.
+- [x] Fresh preparation on operator handoff, persistent claim barrier, no same-ID replay.
+- [x] Offline process-level happy path and six failure/cancellation cases.
+- [ ] Actual production wallet integration and real model client session.
+- [ ] Mainnet acceptance; local mock evidence does not establish signing or real settlement.

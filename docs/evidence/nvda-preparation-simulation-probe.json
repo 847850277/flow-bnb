@@ -1,0 +1,90 @@
+{
+  "execution": "not_requested",
+  "preparation": {
+    "blockers": [
+      "wallet API omitted a requested token balance; unknown is not zero",
+      "swap router is not in local allowlist",
+      "approval spender is not in local allowlist"
+    ],
+    "buy_balance": null,
+    "confirmation_id": null,
+    "created_at": "2026-09-23T07:04:30.562306+00:00",
+    "max_age_seconds": 30,
+    "policy_sha256": "ae08e7f6a76b3c327af38ca66dfce1bd83b23ecf6d8d12e84b82fdaccc92abf2",
+    "quote": {
+      "buy_amount": "26201214238904973",
+      "execution_mode": "SWAP",
+      "notional_usd": "5.999371927609476",
+      "price_impact_bps": 1,
+      "quote_id": "e8368aeca50f4206bdc3b5a744a8514a",
+      "sell_amount": "6000000000000000000",
+      "sell_token_decimals": 18,
+      "sell_token_usd_price": "0.999895321268246",
+      "vendor": "LiquidMesh"
+    },
+    "request": {
+      "amount": "6000000000000000000",
+      "from_token_address": "0x55d398326f99059fF775485246999027B3197955",
+      "slippage_bps": 50,
+      "to_token_address": "0xa9ee28c80f960b889dfbd1902055218cba016f75",
+      "wallet_address": "0x1111111111111111111111111111111111111111"
+    },
+    "rfq_payload_sha256": null,
+    "schema_version": 1,
+    "sell_balance": "359727229276298158350",
+    "simulation_status": "SUCCESS",
+    "stages": [
+      {
+        "business_code": 0,
+        "elapsed_ms": 1910,
+        "http_status": 200,
+        "response_sha256": "775ee801fe53610b3893b87f8f120517484744eb0f5ae033948b18f778582fb9",
+        "stage": "wallet",
+        "success": true
+      },
+      {
+        "business_code": 0,
+        "elapsed_ms": 616,
+        "http_status": 200,
+        "response_sha256": "b4d56fb9039884697f2ae20d7f399d27c2f07be5584ce259e6d943e58361dedc",
+        "stage": "quote",
+        "success": true
+      },
+      {
+        "business_code": 0,
+        "elapsed_ms": 412,
+        "http_status": 200,
+        "response_sha256": "f1a34d6990a9e4f5847f703ba8069bcac426b933ffa0d4291546d3430fa59510",
+        "stage": "build",
+        "success": true
+      },
+      {
+        "business_code": 0,
+        "elapsed_ms": 388,
+        "http_status": 200,
+        "response_sha256": "138ab166617031b4c08ac6a3eb0dc221f67c2ea7317b7098b14123ad3c8fe2ad",
+        "stage": "approval",
+        "success": true
+      },
+      {
+        "business_code": 0,
+        "elapsed_ms": 424,
+        "http_status": 200,
+        "response_sha256": "8c434339ee41e34a7640c15b6674d9acd7c0b62b8f5854cefa76a47cc2afbad4",
+        "stage": "simulate",
+        "success": true
+      }
+    ],
+    "state": "blocked",
+    "transaction": {
+      "approval_amount": "6000000000000000000",
+      "calldata_sha256": "9cc0f8bdb36398ca167d006871d81c1c99a2e3ea324cc2b856228716015f49d5",
+      "chain_id": 56,
+      "from": "0x1111111111111111111111111111111111111111",
+      "kind": "approval",
+      "spender": "0xB44446b0c8E56988c34f7Ff73Ae904982b5FdDA5",
+      "to": "0x55d398326f99059fF775485246999027B3197955",
+      "value": "0"
+    }
+  }
+}
