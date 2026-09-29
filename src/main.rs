@@ -28,6 +28,107 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Authorize a frozen strategy once; no per-order CONFIRM within this mandate.
+    StrategyAuthorize {
+        file: PathBuf,
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long = "input", value_name = "NAME=VALUE")]
+        inputs: Vec<String>,
+        #[arg(long)]
+        max_orders: u32,
+        #[arg(long)]
+        max_total_sell_amount: String,
+        #[arg(long)]
+        valid_for_minutes: u32,
+        #[arg(long, default_value_t = 60)]
+        cooldown_seconds: u32,
+    },
+    /// Run one pre-authorized strategy evaluation without a terminal prompt.
+    StrategyAuto {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long)]
+        authorization_id: String,
+        #[arg(long)]
+        request_id: String,
+    },
+    /// Inspect one authorization, or list all when --id is omitted.
+    StrategyAuthorization {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Revoke future automatic orders; already dispatched orders are unaffected.
+    StrategyRevoke {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long)]
+        id: String,
+    },
+    /// Evaluate a user strategy without trading; optionally queue a triggered intent for an operator.
+    StrategyRun {
+        file: PathBuf,
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long = "input", value_name = "NAME=VALUE")]
+        inputs: Vec<String>,
+        /// Stable retry key. Queues for confirmation, never directly submits a trade.
+        #[arg(long)]
+        enqueue: Option<String>,
+    },
+    /// Install managed wallet dependencies, pair the wallet and generate MCP configuration.
+    Setup {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        /// Prepare dependencies without initiating a new wallet login.
+        #[arg(long)]
+        no_login: bool,
+        /// Display the login link without opening a browser.
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Check wallet installation, login, account binding and outstanding submission locks.
+    Doctor {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+    },
+    /// Start the MCP stdio service from the same executable.
+    Mcp {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
     /// Operate queued native trades; every order requires fresh terminal confirmation.
     AgenticOperator {
         #[arg(
@@ -192,6 +293,96 @@ async fn main() -> Result<()> {
             .map_err(|_| anyhow::anyhow!("could not initialize verbose logging"))?;
     }
     match cli.command {
+        Command::StrategyAuthorize {
+            file,
+            config,
+            id,
+            inputs,
+            max_orders,
+            max_total_sell_amount,
+            valid_for_minutes,
+            cooldown_seconds,
+        } => {
+            let c = flow_bnb::agentic::Config::read(&config)?;
+            let snapshot = load_strategy(&file, inputs)?;
+            let limits = flow_bnb::autonomy::Limits {
+                max_orders,
+                max_total_sell_amount,
+                valid_for_minutes,
+                cooldown_seconds,
+            };
+            let result = flow_bnb::autonomy::authorize(c, id, snapshot, limits).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            eprintln!("策略授权已创建。授权范围内无需逐笔 CONFIRM；修改策略或额度须重新授权。授权不会启动定时任务。");
+            Ok(())
+        }
+        Command::StrategyAuto {
+            config,
+            authorization_id,
+            request_id,
+        } => {
+            let c = flow_bnb::agentic::Config::read(&config)?;
+            let result = flow_bnb::autonomy::execute(c, authorization_id, request_id).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            anyhow::ensure!(
+                matches!(
+                    result["state"].as_str(),
+                    Some("completed" | "not_triggered")
+                ),
+                "automatic execution needs attention; inspect existing record, do not replay"
+            );
+            Ok(())
+        }
+        Command::StrategyAuthorization { config, id } => {
+            let c = flow_bnb::agentic::Config::read(&config)?;
+            let result = match id {
+                Some(id) => flow_bnb::autonomy::status(&c, &id)?,
+                None => flow_bnb::autonomy::list(&c)?,
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Command::StrategyRevoke { config, id } => {
+            let c = flow_bnb::agentic::Config::read(&config)?;
+            println!("{}", flow_bnb::autonomy::revoke(&c, &id)?);
+            Ok(())
+        }
+        Command::StrategyRun {
+            file,
+            config,
+            inputs,
+            enqueue,
+        } => {
+            let c = flow_bnb::agentic::Config::read(&config)?;
+            let snapshot = load_strategy(&file, inputs)?;
+            let result = match enqueue {
+                Some(id) => {
+                    flow_bnb::agentic_handoff::Inbox::open(c)?
+                        .enqueue_strategy(id, snapshot)
+                        .await?
+                }
+                None => serde_json::to_value(flow_bnb::strategy::run(&c, &snapshot).await?)?,
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            anyhow::ensure!(
+                result["success"] != false && result["state"] != "strategy_failed",
+                "strategy evaluation failed; no intent queued"
+            );
+            Ok(())
+        }
+        Command::Setup {
+            config,
+            no_login,
+            no_open,
+        } => flow_bnb::setup::setup(&config, no_login, no_open).await,
+        Command::Doctor { config } => flow_bnb::setup::doctor(&config).await,
+        Command::Mcp { root } => {
+            use rmcp::ServiceExt;
+            let server = flow_bnb::FlowBnbMcpServer::new(root).map_err(anyhow::Error::msg)?;
+            let service = server.serve(rmcp::transport::stdio()).await?;
+            service.waiting().await?;
+            Ok(())
+        }
         Command::AgenticOperator {
             config,
             intent_id,
@@ -680,6 +871,28 @@ impl postman_http::HttpTransport for TradeTransport {
             Self::Demo(t) => t.execute(request, options).await,
         }
     }
+}
+
+fn load_strategy(
+    file: &std::path::Path,
+    inputs: Vec<String>,
+) -> Result<flow_bnb::strategy::Snapshot> {
+    anyhow::ensure!(
+        fs::metadata(file)?.len() <= 65_536,
+        "strategy exceeds 64 KiB"
+    );
+    let source = fs::read_to_string(file)?;
+    let mut bindings = std::collections::BTreeMap::new();
+    for value in inputs {
+        let (name, raw) = split_binding(&value, "--input")?;
+        anyhow::ensure!(
+            bindings
+                .insert(name.to_owned(), parse_json_or_string(raw))
+                .is_none(),
+            "duplicate strategy input"
+        );
+    }
+    flow_bnb::strategy::Snapshot::new(&source, bindings)
 }
 
 #[cfg(test)]

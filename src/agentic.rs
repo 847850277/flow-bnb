@@ -26,7 +26,7 @@ pub const STAGE: &str = include_str!("../flows/agentic_stage.http.yml");
 pub const ORDER: &str = include_str!("../flows/agentic_order.http.yml");
 const URL: &str = "https://agentic-wallet.invalid/local";
 const TRANSFER: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Intent {
     pub from_token: String,
@@ -621,6 +621,12 @@ pub async fn prepare(c: &Config, i: Intent) -> Result<Report> {
     r.stages = c.trace.lock().unwrap().clone();
     Ok(r)
 }
+pub(crate) async fn strategy_quote(c: &Config, i: &Intent) -> Result<Value> {
+    let (sell, buy) = c.rules(i)?;
+    let q = call(c, json!({"op":"quote","intent":i})).await?;
+    validate_quote(&q, i, sell, buy)?;
+    Ok(q)
+}
 fn validate_quote(q: &Value, i: &Intent, sell: &TokenRule, buy: &TokenRule) -> Result<()> {
     ensure!(
         q["fromCoinSymbol"] == sell.symbol && q["toCoinSymbol"] == buy.symbol,
@@ -659,6 +665,34 @@ fn save(file: &mut fs::File, r: &Report) -> Result<()> {
 }
 /// Operator-owned CLI entry point. No model-facing tool calls this execute path.
 pub async fn run(c: Config, i: Intent, path: &Path, execute: bool) -> Result<Report> {
+    run_with_strategy(c, i, path, execute, None).await
+}
+pub(crate) async fn run_with_strategy(
+    c: Config,
+    i: Intent,
+    path: &Path,
+    execute: bool,
+    strategy: Option<crate::strategy::Binding>,
+) -> Result<Report> {
+    run_inner(c, i, path, execute, strategy, None).await
+}
+pub(crate) async fn run_authorized(
+    c: Config,
+    i: Intent,
+    path: &Path,
+    strategy: crate::strategy::Binding,
+    permit: &mut crate::autonomy::Permit,
+) -> Result<Report> {
+    run_inner(c, i, path, true, Some(strategy), Some(permit)).await
+}
+async fn run_inner(
+    c: Config,
+    i: Intent,
+    path: &Path,
+    execute: bool,
+    strategy: Option<crate::strategy::Binding>,
+    mut permit: Option<&mut crate::autonomy::Permit>,
+) -> Result<Report> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -672,45 +706,93 @@ pub async fn run(c: Config, i: Intent, path: &Path, execute: bool) -> Result<Rep
     if !execute || r.state != "ready" {
         return Ok(r);
     }
-    println!("{}", serde_json::to_string_pretty(&r)?);
-    let mut tty = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .context("execution requires an operator terminal")?;
-    writeln!(tty,"Native Agentic Wallet execution: quoted output may change. Local limits cover token amounts and slippage, not USD notional, price impact or independent simulation. Wallet risk checks still apply.\nType CONFIRM to submit this one order (anything else cancels):")?;
-    tty.flush()?;
-    let mut answer = String::new();
-    std::io::BufRead::read_line(&mut std::io::BufReader::new(tty), &mut answer)?;
-    if answer.trim() != "CONFIRM" {
-        r.state = "cancelled".into();
-        save(&mut file, &r)?;
-        return Ok(r);
+    if permit.is_none() {
+        println!("{}", serde_json::to_string_pretty(&r)?);
+        let mut tty = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .context("execution requires an operator terminal")?;
+        writeln!(tty,"Native Agentic Wallet execution: quoted output may change. Local limits cover token amounts and slippage, not USD notional, price impact or independent simulation. Wallet risk checks still apply.\nType CONFIRM to submit this one order (anything else cancels):")?;
+        tty.flush()?;
+        let mut answer = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(tty), &mut answer)?;
+        if answer.trim() != "CONFIRM" {
+            r.state = "cancelled".into();
+            save(&mut file, &r)?;
+            return Ok(r);
+        }
     }
-    // Refresh all read-only gates after the human wait. Never reuse old balances.
-    let refreshed = prepare(&c, r.intent.clone()).await?;
-    if refreshed.state != "ready" {
-        save(&mut file, &refreshed)?;
-        return Ok(refreshed);
+    if permit.is_none() {
+        // Refresh all read-only gates after the human wait. Never reuse old balances.
+        let refreshed = prepare(&c, r.intent.clone()).await?;
+        if refreshed.state != "ready" {
+            save(&mut file, &refreshed)?;
+            return Ok(refreshed);
+        }
+        let (_, buy) = c.rules(&r.intent)?;
+        let old = units(
+            r.quote["toCoinAmount"].as_str().context("missing quote")?,
+            buy.decimals,
+        )?;
+        let new = units(
+            refreshed.quote["toCoinAmount"]
+                .as_str()
+                .context("missing fresh quote")?,
+            buy.decimals,
+        )?;
+        if new < old {
+            r.state = "quote_changed".into();
+            r.error = Some("output decreased while confirming; review a new preparation".into());
+            save(&mut file, &r)?;
+            return Ok(r);
+        }
+        r = refreshed;
     }
-    let (_, buy) = c.rules(&r.intent)?;
-    let old = units(
-        r.quote["toCoinAmount"].as_str().context("missing quote")?,
-        buy.decimals,
-    )?;
-    let new = units(
-        refreshed.quote["toCoinAmount"]
-            .as_str()
-            .context("missing fresh quote")?,
-        buy.decimals,
-    )?;
-    if new < old {
-        r.state = "quote_changed".into();
-        r.error = Some("output decreased while confirming; review a new preparation".into());
-        save(&mut file, &r)?;
-        return Ok(r);
+    if let Some(binding) = &strategy {
+        let checked = async {
+            let snapshot = binding.load(&c)?;
+            let evaluation = crate::strategy::run(&c, &snapshot).await?;
+            r.stages
+                .push(json!({"strategy_sha256":binding.snapshot_sha256,"recheck":evaluation}));
+            if permit.is_some() && evaluation.success {
+                if let Some(d) = &evaluation.decision {
+                    if !d.triggered
+                        && serde_json::to_value(&d.intent)? == serde_json::to_value(&r.intent)?
+                    {
+                        return Ok(false);
+                    }
+                }
+            }
+            crate::strategy::check_decision(&evaluation, &r.intent)?;
+            Ok::<_, anyhow::Error>(true)
+        }
+        .await;
+        match checked {
+            Ok(true) => (),
+            Ok(false) => {
+                r.state = "not_triggered".into();
+                r.error = None;
+                save(&mut file, &r)?;
+                return Ok(r);
+            }
+            Err(e) => {
+                r.state = "strategy_blocked".into();
+                r.error = Some(e.to_string());
+                save(&mut file, &r)?;
+                return Ok(r);
+            }
+        }
     }
-    r = refreshed;
+    if let Some(permit) = permit.as_mut() {
+        permit.reserve(
+            &c,
+            &r.intent,
+            strategy
+                .as_ref()
+                .context("authorized execution requires a frozen strategy")?,
+        )?;
+    }
     // Persistent per-wallet barrier survives crash/timeout even with a new report path.
     reserve_submission(&c, path)?;
     r.state = "submission_outcome_unknown".into();
@@ -736,7 +818,14 @@ pub async fn run(c: Config, i: Intent, path: &Path, execute: bool) -> Result<Rep
         }
         save(&mut file, &r)?;
     }
+    let strategy_checks: Vec<_> = r
+        .stages
+        .iter()
+        .filter(|e| e.get("strategy_sha256").is_some())
+        .cloned()
+        .collect();
     r.stages = c.trace.lock().unwrap().clone();
+    r.stages.extend(strategy_checks);
     save(&mut file, &r)?;
     release_terminal(&c, path, &r)?;
     Ok(r)

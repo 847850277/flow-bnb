@@ -1,0 +1,172 @@
+//! Onboarding is exercised with a fake backend; these tests cannot submit transactions.
+use serde_json::Value;
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+
+struct Fixture {
+    dir: tempfile::TempDir,
+}
+impl Fixture {
+    fn new() -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix("flow setup ' ")
+            .tempdir()
+            .unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        script(
+            &bin.join("node"),
+            r#"#!/bin/sh
+if [ "$1" = '--version' ]; then printf 'v22.23.3\n'; exit 0; fi
+case "$1" in
+*/npm)
+  printf 'install\n' >> "$FLOW_SETUP_TEST_HOME/calls"
+  if [ "$FLOW_SETUP_FAIL_INSTALL" = '1' ]; then exit 1; fi
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = '--prefix' ]; then shift; prefix="$1"; fi
+    shift
+  done
+  /bin/mkdir -p "$prefix/node_modules/.bin" "$prefix/node_modules/@binance/agentic-wallet/dist"
+  /bin/cp "$FLOW_SETUP_TEST_HOME/backend" "$prefix/node_modules/.bin/baw"
+  /bin/cp "$FLOW_SETUP_TEST_HOME/backend" "$prefix/node_modules/@binance/agentic-wallet/dist/index.js"
+  ;;
+*) exec /bin/sh "$@" ;;
+esac
+"#,
+        );
+        script(&bin.join("npm"), "#!/bin/sh\nexit 99\n");
+        script(
+            &dir.path().join("backend"),
+            r#"#!/bin/sh
+if [ -n "$BINANCE_WEB3_API_KEY" ] || [ -n "$BINANCE_WEB3_SECRET_KEY" ]; then exit 88; fi
+printf '%s %s\n' "$1" "$2" >> "$FLOW_SETUP_TEST_HOME/calls"
+case "$1 $2" in
+'--version ') printf '1.10.0\n' ;;
+'wallet status')
+ if [ -f "$FLOW_SETUP_TEST_HOME/connected" ]; then state=CONNECTED; else state=UNCONNECTED; fi
+ printf '{"success":true,"data":{"status":"%s"}}\n' "$state" ;;
+'wallet address')
+ address="${FLOW_SETUP_TEST_ADDRESS:-0xDaD97288C1fcc449D499b7Aa578d1960fdAEeA23}"
+ printf '{"success":true,"data":{"addresses":[{"binanceChainId":"56","address":"%s"}]}}\n' "$address" ;;
+'auth signin') printf '{"success":true,"data":{"urlForWeb":"https://web3.binance.com/en/agent-login?test=1","pairingCode":"001234","qrCodeId":"test-only"}}\n' ;;
+'auth verify')
+ : > "$FLOW_SETUP_TEST_HOME/connected"
+ printf '{"success":true,"data":{"status":"SUCCESS"}}\n' ;;
+*) exit 89 ;;
+esac
+"#,
+        );
+        Self { dir }
+    }
+    fn run(&self, args: &[&str], extra: &[(&str, &str)]) -> std::process::Output {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_flow-bnb"));
+        c.current_dir(self.dir.path())
+            .args(args)
+            .env_remove("FLOW_BNB_AGENTIC_CONFIG")
+            .env("PATH", self.dir.path().join("bin"))
+            .env("FLOW_SETUP_TEST_HOME", self.dir.path())
+            .env("BINANCE_WEB3_API_KEY", "must-not-reach-wallet")
+            .env("BINANCE_WEB3_SECRET_KEY", "must-not-reach-wallet")
+            .envs(extra.iter().copied());
+        c.output().unwrap()
+    }
+    fn config(&self) -> std::path::PathBuf {
+        self.dir.path().join(".flow-bnb/agentic.json")
+    }
+    fn calls(&self) -> String {
+        fs::read_to_string(self.dir.path().join("calls")).unwrap()
+    }
+}
+fn script(p: &Path, s: &str) {
+    fs::write(p, s).unwrap();
+    fs::set_permissions(p, fs::Permissions::from_mode(0o700)).unwrap();
+}
+fn succeeds(o: &std::process::Output) {
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(
+        o.stdout.is_empty(),
+        "setup must not leak auth/config to stdout"
+    );
+}
+
+#[test]
+fn fresh_install_login_repeat_and_doctor_preserve_state() {
+    let f = Fixture::new();
+    let o = f.run(&["setup", "--no-open"], &[]);
+    succeeds(&o);
+    assert!(String::from_utf8_lossy(&o.stderr).contains("001234"));
+    let before = fs::read(f.config()).unwrap();
+    let c: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(c["tokens"][0]["max_sell_amount"], "6");
+    let lock = Path::new(c["state_dir"].as_str().unwrap()).join("agentic-wallet.lock");
+    fs::write(&lock, b"unresolved-order").unwrap();
+    succeeds(&f.run(&["setup", "--no-open"], &[]));
+    let doctor = f.run(&["doctor"], &[]);
+    succeeds(&doctor);
+    assert!(String::from_utf8_lossy(&doctor.stderr).contains("1 个交易提交锁"));
+    assert_eq!(before, fs::read(f.config()).unwrap());
+    assert_eq!(fs::read(lock).unwrap(), b"unresolved-order");
+    assert_eq!(f.calls().lines().filter(|l| *l == "install").count(), 1);
+    assert_eq!(f.calls().lines().filter(|l| *l == "auth signin").count(), 1);
+    let mcp: Value =
+        serde_json::from_slice(&fs::read(f.dir.path().join(".flow-bnb/mcp.json")).unwrap())
+            .unwrap();
+    assert_eq!(mcp["mcpServers"]["flow-bnb"]["args"][0], "mcp");
+    assert_eq!(
+        mcp["mcpServers"]["flow-bnb"]["env"]["FLOW_BNB_AGENTIC_CONFIG"],
+        fs::canonicalize(f.config()).unwrap().to_str().unwrap()
+    );
+    // Managed launcher embeds absolute paths and works in a desktop client's empty PATH.
+    let out = Command::new(c["executable"].as_str().unwrap())
+        .arg("--version")
+        .env("PATH", "/nonexistent")
+        .env("FLOW_SETUP_TEST_HOME", f.dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"1.10.0\n");
+    assert!(!f.calls().contains("market-order"));
+}
+
+#[test]
+fn failed_install_retries_without_publishing_partial_package() {
+    let f = Fixture::new();
+    let o = f.run(&["setup", "--no-open"], &[("FLOW_SETUP_FAIL_INSTALL", "1")]);
+    assert!(!o.status.success());
+    assert!(!f.config().exists());
+    let managed = f.dir.path().join(".flow-bnb/managed");
+    assert_eq!(fs::read_dir(managed).unwrap().count(), 0);
+    succeeds(&f.run(&["setup", "--no-open"], &[]));
+    assert_eq!(f.calls().lines().filter(|l| *l == "install").count(), 2);
+}
+
+#[test]
+fn no_login_can_resume_and_account_mismatch_never_rebinds() {
+    let f = Fixture::new();
+    succeeds(&f.run(&["setup", "--no-login"], &[]));
+    assert!(!f.config().exists());
+    assert!(!f.calls().contains("auth signin"));
+    succeeds(&f.run(&["setup", "--no-open"], &[]));
+    let before = fs::read(f.config()).unwrap();
+    let o = f.run(
+        &["setup", "--no-open"],
+        &[(
+            "FLOW_SETUP_TEST_ADDRESS",
+            "0x0000000000000000000000000000000000000001",
+        )],
+    );
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("不符"));
+    assert_eq!(before, fs::read(f.config()).unwrap());
+}
+
+#[test]
+fn reserved_config_name_is_rejected_before_installation() {
+    let f = Fixture::new();
+    let o = f.run(
+        &["setup", "--config", ".flow-bnb/mcp.json", "--no-login"],
+        &[],
+    );
+    assert!(!o.status.success());
+    assert!(!f.dir.path().join(".flow-bnb").exists());
+    assert!(!f.dir.path().join("calls").exists());
+}

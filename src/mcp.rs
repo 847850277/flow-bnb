@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
@@ -15,6 +16,8 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::receipt::{watch_transaction, WatchOptions, WatchReport, TRANSACTION_RECEIPT};
 
@@ -47,6 +50,7 @@ impl FlowBnbMcpServer {
 
     fn template_source(template: FlowTemplate) -> &'static str {
         match template {
+            FlowTemplate::StockStrategy => crate::strategy::TEMPLATE,
             FlowTemplate::RwaDiscovery => RWA_DISCOVERY,
             FlowTemplate::WalletSnapshot => WALLET_SNAPSHOT,
             FlowTemplate::SafeSwapPreparation => SAFE_SWAP_PREPARATION,
@@ -57,6 +61,9 @@ impl FlowBnbMcpServer {
     }
 
     fn compile_source(source: &str) -> Result<(FlowDocument, FlowSummary, String), String> {
+        if source.len() > 65_536 {
+            return Err("flow YAML exceeds 64 KiB".into());
+        }
         let document = parse_flow_yaml(source).map_err(|error| error.to_string())?;
         let plan = compile_flow(
             &document.flow,
@@ -92,6 +99,9 @@ impl FlowBnbMcpServer {
                 .collect(),
         };
         let canonical_yaml = write_flow_yaml(&document).map_err(|error| error.to_string())?;
+        if canonical_yaml.len() > 65_536 {
+            return Err("canonical flow YAML exceeds 64 KiB".into());
+        }
         Ok((document, summary, canonical_yaml))
     }
 
@@ -142,6 +152,19 @@ impl FlowBnbMcpServer {
         Ok(())
     }
 
+    fn read_flow(&self, relative: &str, expected: Option<&str>) -> Result<String, String> {
+        let path = self.resolve_destination(relative)?;
+        let m = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if !m.is_file() || m.len() > 65_536 {
+            return Err("flow must be a regular file of at most 64 KiB".into());
+        }
+        let source = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        if expected.is_some_and(|hash| hash != source_hash(&source)) {
+            return Err("flow changed since review; read and validate it again".into());
+        }
+        Ok(source)
+    }
+
     fn save(&self, relative: &str, source: &str, overwrite: bool) -> Result<String, String> {
         let path = self.resolve_destination(relative)?;
         let parent = path.parent().expect("validated path has a parent");
@@ -149,23 +172,30 @@ impl FlowBnbMcpServer {
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
         self.reject_symlinks(&path)?;
 
-        let mut options = fs::OpenOptions::new();
-        options.write(true);
-        if overwrite {
-            options.create(true).truncate(true);
-        } else {
-            options.create_new(true);
-        }
-        let mut file = options.open(&path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                format!("{} already exists; pass overwrite=true", path.display())
+        use std::os::unix::fs::OpenOptionsExt;
+        let temp = parent.join(format!(
+            ".flow-save-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let result = (|| -> std::io::Result<()> {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp)?;
+            file.write_all(source.as_bytes())?;
+            file.sync_all()?;
+            if overwrite {
+                fs::rename(&temp, &path)?;
             } else {
-                format!("cannot write {}: {error}", path.display())
+                fs::hard_link(&temp, &path)?;
             }
-        })?;
-        file.write_all(source.as_bytes())
-            .and_then(|_| file.sync_all())
-            .map_err(|error| format!("cannot persist {}: {error}", path.display()))?;
+            fs::File::open(parent)?.sync_all()?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(temp);
+        result.map_err(|e| format!("cannot save {}: {e}", path.display()))?;
         Ok(path
             .strip_prefix(self.root.as_ref())
             .expect("destination is rooted")
@@ -176,6 +206,204 @@ impl FlowBnbMcpServer {
 
 #[tool_router]
 impl FlowBnbMcpServer {
+    #[tool(
+        name = "get_bnb_strategy_authorization",
+        description = "Inspect one operator-created automatic trading authorization, or list them when authorization_id is omitted. Shows frozen strategy, exact order intent, cumulative budget, expiry, cooldown and blockers. Cannot create or increase authorization.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn get_bnb_strategy_authorization(
+        &self,
+        Parameters(a): Parameters<AuthorizationQuery>,
+    ) -> Result<Json<Value>, String> {
+        let c = agentic_config(&self.root)?;
+        match a.authorization_id {
+            Some(id) => crate::autonomy::status(&c, &id),
+            None => crate::autonomy::list(&c),
+        }
+        .map(Json)
+        .map_err(|e| e.to_string())
+    }
+    #[tool(
+        name = "execute_bnb_authorized_strategy",
+        description = "REAL AUTOMATIC TRADING under an existing operator-created strategy authorization. May submit ONE native order WITHOUT terminal CONFIRM. Cannot override strategy, amount, wallet or limits. Requires a stable request_id per evaluation; retries return the same record and never replay. Starts background work: query get_bnb_authorized_execution and keep MCP running. New evaluations need new IDs only after previous results are terminal and safe. Not a scheduler.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = true
+        )
+    )]
+    fn execute_bnb_authorized_strategy(
+        &self,
+        Parameters(a): Parameters<AuthorizedExecutionArgs>,
+    ) -> Result<Json<Value>, String> {
+        crate::autonomy::start(
+            agentic_config(&self.root)?,
+            a.authorization_id,
+            a.request_id,
+        )
+        .map(Json)
+        .map_err(|e| e.to_string())
+    }
+    #[tool(
+        name = "get_bnb_authorized_execution",
+        description = "Read durable automatic execution status and native settlement evidence. Unknown/interrupted outcomes must be inspected, never replayed with another request ID.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn get_bnb_authorized_execution(
+        &self,
+        Parameters(a): Parameters<AuthorizedExecutionArgs>,
+    ) -> Result<Json<Value>, String> {
+        crate::autonomy::execution(
+            &agentic_config(&self.root)?,
+            &a.authorization_id,
+            &a.request_id,
+        )
+        .map(Json)
+        .map_err(|e| e.to_string())
+    }
+    #[tool(
+        name = "refresh_bnb_authorized_execution",
+        description = "Read-only order and receipt refresh for an existing automatic execution with an order ID. Never resubmits or refunds budget. Does not automatically clear a halt.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn refresh_bnb_authorized_execution(
+        &self,
+        Parameters(a): Parameters<AuthorizedExecutionArgs>,
+    ) -> Result<Json<Value>, String> {
+        crate::autonomy::refresh(
+            agentic_config(&self.root)?,
+            a.authorization_id,
+            a.request_id,
+        )
+        .await
+        .map(Json)
+        .map_err(|e| e.to_string())
+    }
+    #[tool(
+        name = "revoke_bnb_strategy_authorization",
+        description = "Revoke a strategy authorization to block future orders. Cannot undo an already dispatched transaction, create authorization or increase limits.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn revoke_bnb_strategy_authorization(
+        &self,
+        Parameters(a): Parameters<AuthorizationId>,
+    ) -> Result<Json<Value>, String> {
+        crate::autonomy::revoke(&agentic_config(&self.root)?, &a.authorization_id)
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "save_bnb_flow",
+        description = "Compile and atomically save USER-AUTHORED Flow YAML under the workspace root. No execution. For overwrites supply overwrite=true and the current sha256 from read_bnb_flow. Returns source hash and restricted strategy diagnostics.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn save_bnb_flow(
+        &self,
+        Parameters(a): Parameters<SaveFlowArguments>,
+    ) -> Result<Json<Value>, String> {
+        if a.overwrite {
+            let hash = a
+                .expected_sha256
+                .as_deref()
+                .ok_or("overwriting requires expected_sha256 from read_bnb_flow")?;
+            self.read_flow(&a.path, Some(hash))?;
+        }
+        let (_, summary, yaml) = Self::compile_source(&a.yaml)?;
+        let saved_path = self.save(&a.path, &yaml, a.overwrite)?;
+        Ok(Json(
+            serde_json::json!({"saved_path":saved_path,"sha256":source_hash(&yaml),"summary":summary,
+            "strategy_validation_error":crate::strategy::check(&yaml).err().map(|e|e.to_string())}),
+        ))
+    }
+
+    #[tool(
+        name = "read_bnb_flow",
+        description = "Read a workspace .http.yml strategy, including full YAML, input summary and sha256 for review or conditional overwrite. Never executes.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn read_bnb_flow(
+        &self,
+        Parameters(a): Parameters<ReadFlowArguments>,
+    ) -> Result<Json<Value>, String> {
+        let source = self.read_flow(&a.path, None)?;
+        let (_, summary, _) = Self::compile_source(&source)?;
+        Ok(Json(
+            serde_json::json!({"path":a.path,"yaml":source,"sha256":source_hash(&source),"summary":summary}),
+        ))
+    }
+
+    #[tool(
+        name = "run_bnb_strategy",
+        description = "Read-only evaluation of saved USER-AUTHORED Flow YAML with inputs. Runs bounded conditions/loops, native quotes and allowlisted Web3 GETs; returns outputs, steps and candidate trade decision. Never queues, signs or submits. Real quotes, not a historical backtest. Maximum 30s/32 requests. Use stock_strategy template for schema.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn run_bnb_strategy(
+        &self,
+        Parameters(a): Parameters<RunStrategyArguments>,
+    ) -> Result<Json<Value>, String> {
+        let source = self.read_flow(&a.path, a.expected_sha256.as_deref())?;
+        let snapshot =
+            crate::strategy::Snapshot::new(&source, a.inputs).map_err(|e| e.to_string())?;
+        let report = crate::strategy::run(&agentic_config(&self.root)?, &snapshot)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Json(
+            serde_json::json!({"sha256":source_hash(&source),"report":report}),
+        ))
+    }
+
+    #[tool(
+        name = "request_bnb_strategy_execution",
+        description = "Evaluate a reviewed saved strategy afresh and QUEUE at most one triggered intent for operator confirmation. Requires source sha256 and stable request_id; retries must reuse ID and inputs. Freezes YAML/inputs; operator rechecks conditions after confirmation before submitting. Not a background scheduler; never signs or submits. Existing execution status/cancel/refresh tools accept returned intent_id.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn request_bnb_strategy_execution(
+        &self,
+        Parameters(a): Parameters<QueueStrategyArguments>,
+    ) -> Result<Json<Value>, String> {
+        let source = self.read_flow(&a.path, Some(&a.expected_sha256))?;
+        let snapshot =
+            crate::strategy::Snapshot::new(&source, a.inputs).map_err(|e| e.to_string())?;
+        agentic_inbox(&self.root)?
+            .enqueue_strategy(a.request_id, snapshot)
+            .await
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
     #[tool(
         name = "request_agentic_execution",
         description = "Queue one native Agentic Wallet trade for an operator. Requires a stable request_id: reuse it with identical arguments on transport retries; never create a replacement to retry a trade. Uses operator-owned configuration and local token limits. Does not submit or approve; an operator's agentic-operator terminal must prepare afresh and confirm.",
@@ -189,7 +417,7 @@ impl FlowBnbMcpServer {
         &self,
         Parameters(args): Parameters<AgenticExecutionArgs>,
     ) -> Result<Json<serde_json::Value>, String> {
-        agentic_inbox()?
+        agentic_inbox(&self.root)?
             .enqueue(args.request_id, args.intent)
             .map(Json)
             .map_err(|e| e.to_string())
@@ -208,7 +436,7 @@ impl FlowBnbMcpServer {
         &self,
         Parameters(args): Parameters<ExecutionIntentId>,
     ) -> Result<Json<serde_json::Value>, String> {
-        agentic_inbox()?
+        agentic_inbox(&self.root)?
             .status(&args.intent_id)
             .map(Json)
             .map_err(|e| e.to_string())
@@ -227,7 +455,7 @@ impl FlowBnbMcpServer {
         &self,
         Parameters(args): Parameters<ExecutionIntentId>,
     ) -> Result<Json<serde_json::Value>, String> {
-        agentic_inbox()?
+        agentic_inbox(&self.root)?
             .cancel(&args.intent_id)
             .map(Json)
             .map_err(|e| e.to_string())
@@ -246,7 +474,7 @@ impl FlowBnbMcpServer {
         &self,
         Parameters(args): Parameters<ExecutionIntentId>,
     ) -> Result<Json<serde_json::Value>, String> {
-        agentic_inbox()?
+        agentic_inbox(&self.root)?
             .refresh(&args.intent_id)
             .await
             .map(Json)
@@ -266,7 +494,7 @@ impl FlowBnbMcpServer {
         &self,
         Parameters(intent): Parameters<crate::agentic::Intent>,
     ) -> Result<Json<serde_json::Value>, String> {
-        let c = agentic_config()?;
+        let c = agentic_config(&self.root)?;
         let report = crate::agentic::prepare(&c, intent)
             .await
             .map_err(|e| e.to_string())?;
@@ -287,9 +515,10 @@ impl FlowBnbMcpServer {
         &self,
         Parameters(args): Parameters<AgenticOrderArgs>,
     ) -> Result<Json<serde_json::Value>, String> {
-        let report = crate::agentic::inspect_order(agentic_config()?, args.intent, args.order_id)
-            .await
-            .map_err(|e| e.to_string())?;
+        let report =
+            crate::agentic::inspect_order(agentic_config(&self.root)?, args.intent, args.order_id)
+                .await
+                .map_err(|e| e.to_string())?;
         serde_json::to_value(report)
             .map(Json)
             .map_err(|e| e.to_string())
@@ -304,6 +533,7 @@ impl FlowBnbMcpServer {
             chain_id: "56".to_owned(),
             network: "BNB Smart Chain mainnet".to_owned(),
             templates: vec![
+                TemplateInfo::new(FlowTemplate::StockStrategy, "Editable native quote -> exact minimum receive threshold -> trade decision. Run with run_bnb_strategy; queue with request_bnb_strategy_execution. No Web3 key needed."),
                 TemplateInfo::new(FlowTemplate::AgenticStage, "Native wallet checks, quotes and operator-only order submission through a local process adapter; requires agentic-trade, not generic HTTP run."),
                 TemplateInfo::new(FlowTemplate::AgenticOrder, "Bounded native order polling through the local adapter; use agentic-track or inspect_agentic_order."),
                 TemplateInfo::new(FlowTemplate::TransactionReceipt, "Track an existing transaction via read-only JSON-RPC with bounded polling and confirmation checks; requires the flow-bnb receipt adapter."),
@@ -329,10 +559,11 @@ impl FlowBnbMcpServer {
                 "/api/v1/dex/pre-transaction/simulate".to_owned(),
             ],
             safety_boundary: vec![
+                "User strategy profile: 64 KiB YAML, 16 KiB inputs, 30 seconds, 32 requests, at most one decision. Local POST https://flow-bnb.invalid/strategy/{quote,compare,decision}; only official Web3 RWA platforms/search/price and wallet balances GETs. File bodies, custom auth, arbitrary network destinations and direct signing/submission are blocked. compare accepts nonnegative decimal strings and eq/gt/gte/lt/lte. decision accepts {triggered:boolean,intent:AgenticIntent}. Native quote accepts AgenticIntent and returns data.toCoinAmount. Conditional steps and bounded loops use standard Flow YAML. Runtime checks every rendered URL.".to_owned(),
                 "MCP tools never accept Binance API credentials or wallet private keys; receipt reports omit the provider RPC URL.".to_owned(),
-                "MCP may queue intents for operator review, but cannot approve them. Generated flows do not sign or broadcast.".to_owned(),
+                "Manual requests queue intents for operator review. Automatic execution needs an operator-created frozen strategy mandate with exact intent, cumulative budget, order count, cooldown and expiry. Generated flows themselves never sign or broadcast.".to_owned(),
                 "Legacy Web3 execution policy requires BSC, size/slippage/impact limits, successful simulation, and explicit operator confirmation.".to_owned(),
-                "Native Agentic Wallet uses separate token-quantity/slippage limits and account/balance/audit gates; it does not inherit legacy USD, price-impact or simulation guarantees. Native execution tools durably queue, query, cancel unclaimed requests and refresh existing orders; agentic-operator alone submits after fresh terminal confirmation.".to_owned(),
+                "Native Agentic Wallet uses separate token-quantity/slippage limits and account/balance/audit gates; it does not inherit legacy USD, price-impact or simulation guarantees. Native execution tools durably queue, query, cancel unclaimed requests and refresh existing orders; Manual execution uses agentic-operator confirmation; execute_bnb_authorized_strategy may submit within a pre-authorized mandate without a per-order prompt. Unknown outcomes or discrepancies halt automatic execution.".to_owned(),
                 "Use an isolated signer or Binance Agentic Wallet only after policy approval.".to_owned(),
             ],
         })
@@ -466,8 +697,9 @@ impl FlowBnbMcpServer {
         Ok(Json(GeneratedFlow {
             template: arguments.template,
             summary,
-            canonical_yaml,
+            canonical_yaml: canonical_yaml.clone(),
             saved_path,
+            sha256: source_hash(&canonical_yaml),
         }))
     }
 
@@ -483,6 +715,9 @@ impl FlowBnbMcpServer {
         Ok(Json(ValidatedFlow {
             valid: true,
             summary,
+            strategy_validation_error: crate::strategy::check(&canonical_yaml)
+                .err()
+                .map(|e| e.to_string()),
             canonical_yaml,
         }))
     }
@@ -550,7 +785,7 @@ impl ServerHandler for FlowBnbMcpServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("flow-bnb-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Start with list_bnb_capabilities. Generate and validate a template, evaluate the trade policy, then build an execution plan. Never ask for private keys or API secrets. For native Agentic Wallet use prepare_agentic_trade and request_agentic_execution with a stable request_id, then get_agentic_execution to retrieve the operator result. Never generate a replacement ID to retry a submitted or unknown order. The operator terminal authorizes execution; this MCP does not sign or broadcast.",
+                "Automatic mode: inspect get_bnb_strategy_authorization first. When the user requests execution under an existing mandate, call execute_bnb_authorized_strategy with authorization_id and stable request_id, then poll get_bnb_authorized_execution. This can trade without CONFIRM. MCP cannot create, edit or expand mandates. Use revoke_bnb_strategy_authorization to stop future submissions. Never replace request IDs to recover unknown execution. Manual mode remains available. For user-authored strategies: generate stock_strategy as a starting point, edit YAML, validate_bnb_flow, save_bnb_flow, read_bnb_flow, then run_bnb_strategy for a read-only preview. On user request call request_bnb_strategy_execution with the reviewed source hash and stable request_id. This queues only a triggered decision; operator rechecks frozen strategy after terminal confirmation. Query/cancel/refresh with existing agentic execution tools. Never treat a dry run as approval or replace an existing ID to retry. Start with list_bnb_capabilities. Generate and validate a template, evaluate the trade policy, then build an execution plan. Never ask for private keys or API secrets. For native Agentic Wallet use prepare_agentic_trade and request_agentic_execution with a stable request_id, then get_agentic_execution to retrieve the operator result. Never generate a replacement ID to retry a submitted or unknown order. Manual requests require operator terminal confirmation; automatic submission is allowed only under an operator-created mandate. Wallet signing remains in Agentic Wallet.",
             )
     }
 }
@@ -558,6 +793,7 @@ impl ServerHandler for FlowBnbMcpServer {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FlowTemplate {
+    StockStrategy,
     AgenticStage,
     AgenticOrder,
     RwaDiscovery,
@@ -619,11 +855,13 @@ pub struct GeneratedFlow {
     pub summary: FlowSummary,
     pub canonical_yaml: String,
     pub saved_path: Option<String>,
+    pub sha256: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ValidatedFlow {
     pub valid: bool,
+    pub strategy_validation_error: Option<String>,
     pub summary: FlowSummary,
     pub canonical_yaml: String,
 }
@@ -682,6 +920,7 @@ mod tests {
     #[test]
     fn all_embedded_templates_compile() {
         for template in [
+            FlowTemplate::StockStrategy,
             FlowTemplate::AgenticStage,
             FlowTemplate::AgenticOrder,
             FlowTemplate::RwaDiscovery,
@@ -725,11 +964,63 @@ pub struct AgenticExecutionArgs {
     pub request_id: String,
     pub intent: crate::agentic::Intent,
 }
-fn agentic_inbox() -> Result<crate::agentic_handoff::Inbox, String> {
-    crate::agentic_handoff::Inbox::open(agentic_config()?).map_err(|e| e.to_string())
+fn agentic_inbox(root: &Path) -> Result<crate::agentic_handoff::Inbox, String> {
+    crate::agentic_handoff::Inbox::open(agentic_config(root)?).map_err(|e| e.to_string())
 }
-fn agentic_config() -> Result<crate::agentic::Config, String> {
-    let p = std::env::var("FLOW_BNB_AGENTIC_CONFIG")
-        .map_err(|_| "operator must configure FLOW_BNB_AGENTIC_CONFIG".to_string())?;
-    crate::agentic::Config::read(Path::new(&p)).map_err(|e| e.to_string())
+fn agentic_config(root: &Path) -> Result<crate::agentic::Config, String> {
+    let p = crate::setup::config_path(root);
+    crate::agentic::Config::read(&p)
+        .map_err(|e| format!("{e}; run flow-bnb setup in {}", root.display()))
+}
+
+fn source_hash(source: &str) -> String {
+    format!("{:x}", Sha256::digest(source.as_bytes()))
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveFlowArguments {
+    pub path: String,
+    pub yaml: String,
+    #[serde(default)]
+    pub overwrite: bool,
+    pub expected_sha256: Option<String>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadFlowArguments {
+    pub path: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunStrategyArguments {
+    pub path: String,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, Value>,
+    pub expected_sha256: Option<String>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueueStrategyArguments {
+    pub path: String,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, Value>,
+    pub expected_sha256: String,
+    pub request_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationQuery {
+    pub authorization_id: Option<String>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationId {
+    pub authorization_id: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizedExecutionArgs {
+    pub authorization_id: String,
+    pub request_id: String,
 }

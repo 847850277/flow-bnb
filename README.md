@@ -2,7 +2,7 @@
 
 基于 `postman-flow` 的 BNB Chain 交易工作流工具，提供 Rust CLI 和 MCP 服务。
 
-**交易意图 → 钱包与策略检查 → 报价 → 操作员确认 → Agentic Wallet 执行 → 订单跟踪 → 链上到账核对。**
+**交易意图 → 钱包与策略检查 → 报价 → 人工确认或策略预授权 → Agentic Wallet 执行 → 订单跟踪 → 链上到账核对。**
 
 - `flows/`：资产发现、钱包查询、报价与模拟、原生订单和回执跟踪模板。
 - `src/`：Flow 适配器、交易规则、持久化请求队列和 MCP 工具。
@@ -10,17 +10,17 @@
 
 ## 快速开始
 
-需要 Rust（最低 1.90，仓库工具链指定 1.97）。原生交易还需要 macOS/Linux 终端，以及已安装并登录的 Binance Agentic Wallet CLI `baw`。
-
-在仓库根目录执行：
+需要 Rust（最低 1.90，仓库工具链指定 1.97）和 macOS/Linux。首次在仓库根目录运行：
 
 ```sh
-cargo build --locked --bins
-mkdir -p .flow-bnb
-cp examples/agentic-config.json .flow-bnb/agentic.json
+cargo run --locked -- setup
 ```
 
-编辑 `.flow-bnb/agentic.json`：填写 `baw` 的绝对路径、自己的 Agentic Wallet 地址和私有 `state_dir` 绝对路径，核对代币白名单、单笔数量和滑点限制。状态目录会创建为 0700；配置与钱包会话保留在本机。
+Flow 自动准备 `baw`、引导币安 App 扫码登录、绑定 BSC 地址并生成配置。无需单独安装 `baw` 或填写签名器路径；已有登录、交易限额和订单状态会保留。新配置默认白名单为 USDT / AAPLon，单笔卖出上限分别为 6 / 0.01，滑点上限 0.5%，保存在 `.flow-bnb/agentic.json`。
+
+依赖安装在配置目录下的 `managed/`，不修改全局 npm。固定使用 `baw 1.10.0`；优先复用 Node 18+，缺少可用 Node/npm 时自动下载经固定 SHA-256 校验的 Node 22.23.3。自动安装支持 macOS/Linux arm64/x64（Linux 需兼容 glibc），下载需要系统 `curl`、`tar` 及 Node/npm 官方站点网络访问。不会静默升级已有后端。
+
+遇到问题运行 `cargo run --locked -- doctor`；登录失效或安装中断可重跑 `setup`。`setup --no-open` 只显示登录链接，`setup --no-login` 准备依赖但不发起新登录。手机确认最长等待五分钟，期间保持终端开启；无需提供私钥或助记词。
 
 只读准备示例（请求卖出 0.01 AAPLon，需有相应余额）：
 
@@ -34,21 +34,7 @@ cargo run --locked -- agentic-trade \
 
 ## MCP 接入
 
-将以下配置中的路径替换为本机绝对路径，添加到支持 stdio 的 MCP 客户端：
-
-```json
-{
-  "mcpServers": {
-    "flow-bnb": {
-      "command": "/absolute/path/flow-bnb/target/debug/flow-bnb-mcp",
-      "args": ["--root", "/absolute/path/flow-bnb"],
-      "env": {
-        "FLOW_BNB_AGENTIC_CONFIG": "/absolute/path/flow-bnb/.flow-bnb/agentic.json"
-      }
-    }
-  }
-}
-```
+`setup` 会生成 `.flow-bnb/mcp.json`，把其中的 `flow-bnb` 条目添加到 MCP 客户端即可，无需手填路径。CLI 与 MCP 使用同一个 Flow 可执行文件（`flow-bnb mcp`）；配置还携带 Node 路径，适用于桌面客户端的精简环境。移动或重建安装位置后重新运行 `setup` 生成配置。
 
 另开操作员终端，使用同一份配置持续接收交易请求：
 
@@ -65,7 +51,48 @@ cargo run --locked -- agentic-operator --watch
 | `refresh_agentic_execution` | 恢复已有订单的只读核对 |
 | `inspect_agentic_order` | 核对其他入口已提交的订单 |
 
-每笔交易仍在操作员终端确认；MCP 排队不等于授权。当前提供本地配置方式，WorkBuddy 实际客户端验收及公开地址一键安装包尚未完成。
+上述手动模式在操作员终端逐笔确认；预授权自动模式见下文。MCP 排队不等于授权。当前提供本地配置方式，WorkBuddy 实际客户端验收及公开地址一键安装包尚未完成。
+
+## 自定义策略
+
+在 WorkBuddy 中描述条件后，AI 可参考 `generate_bnb_flow(template="stock_strategy")` 编写 YAML，再依次调用 `validate_bnb_flow`、`save_bnb_flow`、`run_bnb_strategy`。`read_bnb_flow` 返回源码和 SHA-256；覆盖文件必须提供旧哈希，避免覆盖未审阅的修改。编译通过不代表策略收益或执行安全得到保证，运行时还会检查数据源与本地限额。
+
+显式请求执行时调用 `request_bnb_strategy_execution`，传入文件路径、审阅后的 `expected_sha256`、输入和稳定的 `request_id`。条件成立才进入现有操作员队列，返回的 `intent_id` 可用已有查询、取消、回查工具处理。已入队的同 ID 重试直接返回原状态；条件不成立时不入队，再次调用会重新求值。队列冻结 YAML 和输入，操作员输入 `CONFIRM` 后重新检查策略，条件失效、意图改变或检查失败均停止提交。
+
+样例 `flows/stock_strategy.http.yml`：用 6 USDT 询价，报价至少获得 0.02 AAPLon 才触发。可修改输入、条件分支和有限次数循环。CLI 与 MCP 使用相同执行器：
+
+```sh
+# 只读求值，不下单
+cargo run --locked -- strategy-run flows/stock_strategy.http.yml \
+  --input 'min_receive="0.02"'
+# 显式加 --enqueue <稳定请求ID> 才会在条件成立时排队，仍需操作员确认
+```
+
+策略使用标准 Flow YAML。内置本地端点 `https://flow-bnb.invalid/strategy/quote` 接收交易意图、返回原生报价；`compare` 接收十进制字符串 `left` / `right` 和 `operator`（eq/gt/gte/lt/lte）；`decision` 接收 `triggered` 和 `intent`。这些 POST 由本地适配器处理。也允许官方 Web3 的 RWA 平台、搜索、价格和钱包余额 GET 查询，相关步骤需要 API Key。其他网络地址、文件请求体、认证注入及直接下单操作会被拒绝。
+
+每次最多 30 秒、32 次请求、一个交易决策；YAML 上限 64 KiB、输入上限 16 KiB。试运行使用实时只读数据，不是历史回测，也不会启动常驻监控或定时任务。
+
+## 策略自动执行
+
+人预先设定策略和权限，Agent 在权限内执行，不再逐笔输入 `CONFIRM`。首次由用户运行一次授权命令，固定策略源码、输入、钱包、交易对、单笔数量和滑点，并设置累计卖出额度、单数、间隔和到期时间。例如：
+
+```sh
+cargo run --locked -- strategy-authorize flows/stock_strategy.http.yml \
+  --id apple-small --max-orders 3 --max-total-sell-amount 18 \
+  --valid-for-minutes 60 --cooldown-seconds 300
+```
+
+这会创建真实自动执行权限，但不立即下单或启动定时任务。策略须始终输出 `decision`（条件不满足时 `triggered=false`），首次只读检查成功才创建授权。上例沿用样例的每单 6 USDT，最多 3 单、累计最多 18 USDT、至少间隔 300 秒、1 小时后到期。额度按卖出代币数量计，BNB 手续费另计。
+
+接入 MCP 后，Agent 用 `get_bnb_strategy_authorization` 查找授权，调用 `execute_bnb_authorized_strategy`（`authorization_id`、`request_id`）启动一次自动求值，再用 `get_bnb_authorized_execution` 查询结果。无需另开操作员终端；执行期间保持 MCP 进程运行。也可直接运行：
+
+```sh
+cargo run --locked -- strategy-auto --authorization-id apple-small --request-id apple-check-001
+# 停止未来提交；不能撤回已经开始提交的订单
+cargo run --locked -- strategy-revoke --id apple-small
+```
+
+同一 `request_id` 永不重复执行，包括条件未触发的检查；下一次独立检查使用新 ID。发生中断、提交结果不明或到账差额时停止自动执行，并保留额度预留和钱包锁，不自动退款额度、重试或恢复。`refresh_bnb_authorized_execution` 只回查已有订单；异常恢复后仍需用户复核。MCP 可撤销授权，不能创建或扩大授权；变更策略需用户撤销旧授权后重新授权。单次策略求值仍受上述 30 秒/32 请求限制，每个授权最多保留 1024 次求值记录，自动执行不是常驻调度器。
 
 ## 当前边界
 

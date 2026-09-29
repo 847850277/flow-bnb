@@ -14,6 +14,8 @@ pub struct Request {
     pub intent: agentic::Intent,
     pub wallet_address: String,
     pub config_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<crate::strategy::Binding>,
 }
 
 pub struct Inbox {
@@ -35,6 +37,10 @@ impl Inbox {
 
     /// Client-provided retry key deduplicates network retries of the same request.
     pub fn enqueue(&self, request_id: String, intent: agentic::Intent) -> Result<Value> {
+        self.enqueue_bound(request_id, intent, None)
+    }
+
+    fn request_key(request_id: &str) -> Result<String> {
         ensure!(
             !request_id.is_empty()
                 && request_id.len() <= 128
@@ -43,21 +49,79 @@ impl Inbox {
                     .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
             "request_id must contain 1..128 ASCII letters, digits, dots, underscores or hyphens"
         );
-        self.config.rules(&intent)?;
-        let id = format!(
+        Ok(format!(
             "{:x}",
             Sha256::digest(format!("agentic-handoff-v1:{request_id}"))
-        );
+        ))
+    }
+
+    fn enqueue_bound(
+        &self,
+        request_id: String,
+        intent: agentic::Intent,
+        strategy: Option<crate::strategy::Binding>,
+    ) -> Result<Value> {
+        self.config.rules(&intent)?;
+        let id = Self::request_key(&request_id)?;
         self.queue.enqueue_with_id(
             Request {
                 request_id,
                 intent,
                 wallet_address: self.config.wallet_address.clone(),
                 config_sha256: agentic::digest(&self.config)?,
+                strategy,
             },
             id.clone(),
         )?;
         self.status(&id)
+    }
+
+    /// Evaluate once and queue only a successful, triggered decision. Retries return the original intent.
+    pub async fn enqueue_strategy(
+        &self,
+        request_id: String,
+        snapshot: crate::strategy::Snapshot,
+    ) -> Result<Value> {
+        let id = Self::request_key(&request_id)?;
+        let binding = snapshot.binding()?;
+        if self
+            .directory
+            .join(format!("{id}.intent.json"))
+            .try_exists()?
+        {
+            let existing = self.queue.intent(&id)?.request;
+            self.check_binding(&existing)?;
+            ensure!(existing.strategy.as_ref().is_some_and(|s| s.snapshot_sha256 == binding.snapshot_sha256),
+                "request ID already belongs to another strategy or intent; query the existing intent");
+            return self.status(&id);
+        }
+        let report = crate::strategy::run(&self.config, &snapshot).await?;
+        self.finish_strategy(request_id, snapshot, report)
+    }
+
+    fn finish_strategy(
+        &self,
+        request_id: String,
+        snapshot: crate::strategy::Snapshot,
+        report: crate::strategy::RunReport,
+    ) -> Result<Value> {
+        if !report.success || !report.decision.as_ref().is_some_and(|d| d.triggered) {
+            return Ok(
+                json!({"state":if report.success {"not_triggered"} else {"strategy_failed"},
+                "queued":false,"strategy_run":report}),
+            );
+        }
+        let intent = report
+            .decision
+            .as_ref()
+            .context("missing strategy decision")?
+            .intent
+            .clone();
+        let binding = snapshot.persist(&self.config)?;
+        let mut result = self.enqueue_bound(request_id, intent, Some(binding))?;
+        result["queued"] = json!(true);
+        result["strategy_run"] = serde_json::to_value(report)?;
+        Ok(result)
     }
 
     fn report_path(&self, id: &str) -> Result<PathBuf> {
@@ -122,6 +186,7 @@ impl Inbox {
             "backend":"agentic_wallet", "state":journal.state,
             "created_at":queued.created_at, "updated_at":journal.updated_at,
             "intent":queued.request.intent, "wallet_address":queued.request.wallet_address,
+            "strategy":queued.request.strategy,
             "message":journal.message, "result":null,
             "operator_message":journal.message,
             "can_cancel":journal.state=="awaiting_operator", "retry_execution":false,
@@ -153,7 +218,7 @@ impl Inbox {
             value["message"] = json!(match state {
                 "completed" => "Order and on-chain transfers verified.",
                 "settled_with_discrepancy" => "On-chain trade verified with an amount discrepancy. Review required; wallet lock retained. Never resubmit or automatically sell the difference.",
-                "cancelled" | "blocked" | "quote_changed" | "not_submitted" => "No order submitted by this attempt. The intent remains claimed and cannot replay.",
+                "cancelled" | "blocked" | "quote_changed" | "strategy_blocked" | "not_submitted" => "No order submitted by this attempt. The intent remains claimed and cannot replay.",
                 _ => "Inspect the existing order; use refresh_agentic_execution when an order ID is available. Never resubmit."
             });
         } else if self.report_path(id)?.try_exists()? {
@@ -191,17 +256,26 @@ impl Inbox {
             !barrier.try_exists()?,
             "wallet submission lock exists; resolve previous order before claiming another intent"
         );
+        if let Some(binding) = &request.strategy {
+            let snapshot = binding.load(&self.config)?;
+            println!(
+                "Strategy snapshot {} (inputs and flow):\n{}",
+                binding.snapshot_sha256,
+                serde_json::to_string_pretty(&snapshot)?
+            );
+        }
         let mut claim = self.queue.claim(id)?;
         claim.record(
             "operator_active",
             "Operator is preparing, reviewing or tracking. This intent cannot be claimed again.",
         )?;
         println!("Reviewing queued Agentic Wallet intent: {id}");
-        match agentic::run(
+        match agentic::run_with_strategy(
             self.config.clone(),
             request.intent,
             &self.report_path(id)?,
             true,
+            request.strategy,
         )
         .await
         {
