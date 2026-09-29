@@ -338,7 +338,7 @@ async fn login(baw: &Path, node: &Path, no_open: bool) -> Result<()> {
     let data = wallet(baw, node, &["auth", "signin"], 30).await?;
     if data["status"] != "ALREADY_CONNECTED" {
         let (link, code, id) = login_details(&data)?;
-        eprintln!("\n请在币安 App 中核对配对码：{code}\n登录链接：{link}\n等待手机确认，最长 5 分钟；请保持此终端开启…");
+        eprintln!("\n请在币安 App 中核对配对码：{code}\n登录链接： {link} \n等待手机确认，最长 5 分钟；请保持连接窗口开启…");
         if !no_open {
             if let Some(opener) = executable(if cfg!(target_os = "macos") {
                 "open"
@@ -486,7 +486,67 @@ pub async fn setup(config: &Path, no_login: bool, no_open: bool) -> Result<()> {
     } else {
         shell_quote(&cli.to_string_lossy())
     };
-    eprintln!("\n已就绪 · BSC 钱包 {address}\n钱包配置：{}\nMCP 配置：{}\n将 MCP 配置添加到客户端；操作员终端运行：\n{invocation} agentic-operator --config {} --watch", config.display(), mcp_path.display(), shell_quote(&config.to_string_lossy()));
+    eprintln!("\n已就绪 · BSC 钱包 {address}\n钱包配置：{}\nMCP 配置：{}\n连接器用户可返回对话开始查询和创建策略。手动配置客户端时使用上述 MCP 配置。\n仅逐笔人工确认模式需要操作员终端：\n{invocation} agentic-operator --config {} --watch", config.display(), mcp_path.display(), shell_quote(&config.to_string_lossy()));
+    Ok(())
+}
+
+fn installed_node(config: &Path) -> Result<PathBuf> {
+    executable("node")
+        .or_else(|| {
+            let (platform, _) = node_archive(env::consts::OS, env::consts::ARCH).ok()?;
+            let p = config
+                .parent()?
+                .join("managed")
+                .join(format!("node-v{NODE_VERSION}-{platform}/bin/node"));
+            p.is_file().then_some(p)
+        })
+        .context("没有找到 Node；请重新连接以准备依赖")
+}
+
+/// No installation, login, configuration writes or trading. Fits the connector's
+/// ten-second status budget even if the wallet API stalls.
+pub async fn connection_status(config: &Path) -> Result<String> {
+    let c = crate::agentic::Config::read(config)?;
+    let node = installed_node(config)?;
+    ensure!(
+        wallet(&c.executable, &node, &["wallet", "status"], 3).await?["status"] == "CONNECTED",
+        "钱包未连接"
+    );
+    let address = bsc_address(&wallet(&c.executable, &node, &["wallet", "address"], 3).await?)?;
+    ensure!(
+        address.eq_ignore_ascii_case(&c.wallet_address),
+        "钱包与配置不符"
+    );
+    Ok(address)
+}
+
+/// Sign out only. Never delete a policy or a lock to make reconnection succeed.
+pub async fn disconnect(config: &Path) -> Result<()> {
+    let parent = config.parent().context("missing configuration directory")?;
+    if !parent.exists() {
+        return Ok(());
+    }
+    private_dir(parent)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(parent.join("setup.lock"))?;
+    lock.try_lock()
+        .context("钱包正在配对，请先取消或完成配对后再断开")?;
+    let executable = if config.exists() {
+        crate::agentic::Config::read(config)?.executable
+    } else {
+        parent.join(format!("managed/baw-{BAW_VERSION}/baw"))
+    };
+    if !executable.exists() {
+        return Ok(());
+    }
+    let node = installed_node(config)?;
+    wallet(&executable, &node, &["auth", "signout"], 25).await?;
+    eprintln!("钱包已登出；交易规则、授权记录和未决订单仍保留。已提交的订单不会撤回。");
     Ok(())
 }
 

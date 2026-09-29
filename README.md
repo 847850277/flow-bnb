@@ -8,7 +8,15 @@
 - `src/`：Flow 适配器、交易规则、持久化请求队列和 MCP 工具。
 - `examples/`：钱包配置及交易请求样例。
 
-## 快速开始
+## WorkBuddy 安装入口
+
+已提供 WorkBuddy 5.0+ 的本地 MCP 连接器打包方案：**安装连接器 → 自动准备 Flow 和钱包依赖 → 币安 App 确认登录 → 返回对话使用**。Flow 引擎和 MCP 在同一份预编译程序内；用户不需要 Rust、手动编译或单独安装 `baw`。连接器用 WorkBuddy 托管的 Node 22 启动，钱包配对由官方登录页完成，不自动授权交易。
+
+目前已完成本机 macOS arm64 安装包与真实 MCP 协议验收；**尚未发布公开下载地址，也未在 WorkBuddy 界面完成验收**。发布流程会生成 `flow-bnb-workbuddy.zip` 连接器和包含四个平台原生程序的 npm 安装包。发布后连接器按固定版本自动获取安装包。制作和验收步骤见 [安装包说明](packaging/README.md)。
+
+安装后的数据默认保存在 `~/.local/share/flow-bnb/`，独立于 npm 缓存；升级不覆盖策略、钱包限额或未决订单。连接器自动检查登录状态，断开时调用官方登出，重连不清除交易记录。已有源码工作区配置不会被自动迁移。支持 macOS arm64/x64、Linux glibc x64/arm64；尚不支持 Windows。
+
+## 源码开发与本地运行
 
 需要 Rust（最低 1.90，仓库工具链指定 1.97）和 macOS/Linux。首次在仓库根目录运行：
 
@@ -51,7 +59,7 @@ cargo run --locked -- agentic-operator --watch
 | `refresh_agentic_execution` | 恢复已有订单的只读核对 |
 | `inspect_agentic_order` | 核对其他入口已提交的订单 |
 
-上述手动模式在操作员终端逐笔确认；预授权自动模式见下文。MCP 排队不等于授权。当前提供本地配置方式，WorkBuddy 实际客户端验收及公开地址一键安装包尚未完成。
+上述手动模式在操作员终端逐笔确认；预授权自动模式见下文。MCP 排队不等于授权。源码方式使用上述本地配置；连接器安装包已可构建，公开发布与 WorkBuddy 实际客户端验收待完成。
 
 ## 自定义策略
 

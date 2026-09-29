@@ -1,0 +1,80 @@
+// Maintainer-only packaging. Users receive compiled binaries, never a Rust build.
+import * as fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const args = process.argv.slice(2);
+function option(name, fallback) { const i = args.indexOf(name); return i < 0 ? fallback : args[i + 1]; }
+const binaries = path.resolve(option('--binaries', path.join(repo, 'dist', 'native')));
+const output = path.resolve(option('--output', path.join(repo, 'dist', 'release')));
+const local = args.includes('--local');
+const pkg = JSON.parse(fs.readFileSync(path.join(repo, 'packaging/desktop/package.json')));
+const cargo = fs.readFileSync(path.join(repo, 'Cargo.toml'), 'utf8').match(/^version = "([^"]+)"/m)[1];
+if (cargo !== pkg.version) throw new Error('Cargo/npm versions differ');
+if (fs.existsSync(output)) throw new Error(`Output already exists: ${output}; choose a new --output`);
+const platforms = local ? [`${process.platform}-${process.arch}`] : ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64'];
+for (const key of platforms) {
+  const stat = fs.lstatSync(path.join(binaries, key, 'flow-bnb'));
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`Missing native binary: ${key}`);
+}
+const dest = path.join(output, 'package');
+fs.mkdirSync(dest, { recursive: true });
+fs.cpSync(path.join(repo, 'packaging/desktop'), dest, { recursive: true, filter: p => !p.endsWith('.test.mjs') });
+fs.copyFileSync(path.join(repo, 'LICENSE'), path.join(dest, 'LICENSE'));
+fs.mkdirSync(path.join(dest, 'flows'));
+const sha = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const manifest = { version: pkg.version, binaries: {}, flows: {} };
+for (const key of platforms) {
+  const to = path.join(dest, 'native', key, 'flow-bnb');
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  fs.copyFileSync(path.join(binaries, key, 'flow-bnb'), to); fs.chmodSync(to, 0o755);
+  manifest.binaries[key] = sha(to);
+}
+for (const file of fs.readdirSync(path.join(repo, 'flows')).filter(f => f.endsWith('.http.yml')).sort()) {
+  const to = path.join(dest, 'flows', file);
+  fs.copyFileSync(path.join(repo, 'flows', file), to); manifest.flows[file] = sha(to);
+}
+fs.writeFileSync(path.join(dest, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+function run(cmd, args, cwd) {
+  const p = spawnSync(cmd, args, { cwd, encoding: 'utf8' });
+  if (p.status !== 0) throw new Error(`${cmd} failed: ${p.error?.message || p.stderr}`);
+  return p.stdout;
+}
+const packed = JSON.parse(run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', output], dest))[0].filename;
+const archive = `flow-bnb-desktop-${pkg.version}.tgz`;
+fs.renameSync(path.join(output, packed), path.join(output, archive));
+// Local connector is an importable, offline-binary preview, not a published URL.
+const url = `https://github.com/847850277/flow-bnb/releases/download/v${pkg.version}/${archive}`;
+const command = local ? 'node' : 'npx';
+const prefix = local ? [path.join(dest, 'launcher.mjs')] : ['--yes', '--package', url, 'flow-bnb-desktop'];
+const quote = s => "'" + s.replaceAll("'", "'\\''") + "'";
+const invoke = mode => [command, ...prefix, mode].map(quote).join(' ');
+const connector = path.join(output, 'flow-bnb-connector');
+fs.mkdirSync(connector);
+const json = (file, data) => fs.writeFileSync(path.join(connector, file), JSON.stringify(data, null, 2) + '\n');
+json('connector-meta.json', {
+  name: 'Flow BNB', name_zh: 'Flow BNB', name_en: 'Flow BNB',
+  description: 'Create auditable stock-token strategies and execute within your wallet authorization.',
+  description_zh: '用自然语言创建股票代币策略，检查报价、执行授权范围内的交易并核对到账。首次连接自动安装所需程序并引导钱包登录。',
+  description_en: 'Create stock-token strategies, check quotes, execute authorized trades and reconcile settlement. First connection installs dependencies and pairs your wallet.',
+  source: 'flow-bnb', type: 'mcp', version: pkg.version, minWorkbuddyVersion: '5.0.0',
+  examples_zh: ['创建一个满足报价条件才买入 AAPLon 的策略，先试运行', '查看已授权策略的执行记录和实际到账'],
+  examples_en: ['Create an AAPLon quote-threshold strategy and preview it', 'Show my authorized strategy execution and settlement']
+});
+json('mcp.json', { preAuth: 'cli', mcpServers: { 'flow-bnb': {
+  type: 'stdio', command, args: [...prefix, 'mcp'], runtime: { type: 'node', version: '22' },
+  npmRegistry: 'https://registry.npmjs.org', timeout: 30000
+} } });
+const platformsCommand = mode => ({ darwin: invoke(mode), linux: invoke(mode) });
+json('cli.json', {
+  runtime: { type: 'node', version: '22' }, npmRegistry: 'https://registry.npmjs.org',
+  init: platformsCommand('install'), auth: platformsCommand('login'),
+  status: platformsCommand('status'), unAuth: platformsCommand('logout'),
+  statusMatch: '"connected"\\s*:\\s*true', authUrlDomain: 'web3.binance.com', authWaitForExit: true
+});
+fs.copyFileSync(path.join(repo, 'packaging/workbuddy/icon.svg'), path.join(connector, 'icon.svg'));
+run('zip', ['-q', '-r', path.join(output, 'flow-bnb-workbuddy.zip'), 'flow-bnb-connector'], output);
+fs.writeFileSync(path.join(output, 'SHA256SUMS'), [archive, 'flow-bnb-workbuddy.zip'].map(f => `${sha(path.join(output, f))}  ${f}`).join('\n') + '\n');
+console.log(JSON.stringify({ output, local, archive, connector, publicationRequired: !local }, null, 2));

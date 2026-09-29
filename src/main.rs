@@ -28,6 +28,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Read-only connection check for desktop connector onboarding (JSON).
+    ConnectionStatus {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+    },
+    /// Sign out of Agentic Wallet; preserve policies, reports and submission locks.
+    Disconnect {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+    },
     /// Authorize a frozen strategy once; no per-order CONFIRM within this mandate.
     StrategyAuthorize {
         file: PathBuf,
@@ -293,6 +311,25 @@ async fn main() -> Result<()> {
             .map_err(|_| anyhow::anyhow!("could not initialize verbose logging"))?;
     }
     match cli.command {
+        Command::ConnectionStatus { config } => {
+            let result = flow_bnb::setup::connection_status(&config).await;
+            match result {
+                Ok(address) => println!(
+                    "{}",
+                    serde_json::json!({"connected":true,"wallet_address":address})
+                ),
+                Err(_) => {
+                    println!("{}", serde_json::json!({"connected":false}));
+                    bail!("钱包未连接、账户不匹配或状态暂不可用；请在连接器中重新连接")
+                }
+            }
+            Ok(())
+        }
+        Command::Disconnect { config } => {
+            flow_bnb::setup::disconnect(&config).await?;
+            println!("{}", serde_json::json!({"connected":false}));
+            Ok(())
+        }
         Command::StrategyAuthorize {
             file,
             config,

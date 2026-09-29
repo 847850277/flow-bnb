@@ -9,3 +9,6 @@
 *.wallet.local.json
 
 /.playwright-mcp/
+
+# Native distribution artifacts (never wallet data)
+/dist/

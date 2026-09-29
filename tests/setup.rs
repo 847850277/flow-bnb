@@ -47,6 +47,9 @@ case "$1 $2" in
 'wallet address')
  address="${FLOW_SETUP_TEST_ADDRESS:-0xDaD97288C1fcc449D499b7Aa578d1960fdAEeA23}"
  printf '{"success":true,"data":{"addresses":[{"binanceChainId":"56","address":"%s"}]}}\n' "$address" ;;
+'auth signout')
+ /bin/rm -f "$FLOW_SETUP_TEST_HOME/connected"
+ printf '{"success":true,"data":{}}\n' ;;
 'auth signin') printf '{"success":true,"data":{"urlForWeb":"https://web3.binance.com/en/agent-login?test=1","pairingCode":"001234","qrCodeId":"test-only"}}\n' ;;
 'auth verify')
  : > "$FLOW_SETUP_TEST_HOME/connected"
@@ -169,4 +172,43 @@ fn reserved_config_name_is_rejected_before_installation() {
     assert!(!o.status.success());
     assert!(!f.dir.path().join(".flow-bnb").exists());
     assert!(!f.dir.path().join("calls").exists());
+}
+
+#[test]
+fn connector_status_logout_and_relogin_preserve_policy_and_order_locks() {
+    let f = Fixture::new();
+    let missing = f.run(&["connection-status"], &[]);
+    assert!(!missing.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&missing.stdout).unwrap()["connected"],
+        false
+    );
+    assert!(!f.config().exists());
+    succeeds(&f.run(&["setup", "--no-open"], &[]));
+    let before = fs::read(f.config()).unwrap();
+    let lock = f.config().parent().unwrap().join("unresolved.lock");
+    fs::write(&lock, "pending").unwrap();
+    let ok = f.run(&["connection-status"], &[]);
+    assert!(ok.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&ok.stdout).unwrap()["connected"],
+        true
+    );
+    let wrong = f.run(
+        &["connection-status"],
+        &[(
+            "FLOW_SETUP_TEST_ADDRESS",
+            "0x0000000000000000000000000000000000000001",
+        )],
+    );
+    assert!(!wrong.status.success());
+    let logout = f.run(&["disconnect"], &[]);
+    assert!(logout.status.success());
+    assert!(!f.run(&["connection-status"], &[]).status.success());
+    assert!(f.run(&["disconnect"], &[]).status.success());
+    succeeds(&f.run(&["setup", "--no-open"], &[]));
+    assert!(f.run(&["connection-status"], &[]).status.success());
+    assert_eq!(before, fs::read(f.config()).unwrap());
+    assert_eq!(fs::read_to_string(lock).unwrap(), "pending");
+    assert!(!f.calls().contains("market-order"));
 }
