@@ -98,6 +98,10 @@ flow-bnb approve-trade \
 
 ## 内置开发节点钱包
 
+币安 App 手机钱包使用独立的本机扫码适配器，见[手机钱包接入](mobile-wallet.zh-CN.md)。
+`approve-trade --signer /绝对路径/签名器 --rpc-url https://...` 可以替代 `--wallet-config`；
+手机模式成功状态为 `completed_wallet`，不能使用 `--demo`。真实手机和主网交易尚待验收。
+
 ```sh
 flow-bnb-wallet-rpc --config /absolute/path/to/dev-wallet.json
 ```
@@ -130,7 +134,7 @@ HTTP 重定向被禁用，Binance 请求头不会发送到钱包 RPC；父进程
 ## 还需要完成什么
 
 - 配置真实大模型客户端，并验证自然语言驱动的操作过程；当前演示使用固定逻辑的 MCP 测试客户端。
-- 选定并接入生产钱包，完成对应的钱包确认交互。
+- 验收已实现的币安 App 扫码适配器，完成真实手机确认交互。
 - 验证真实授权与兑换模拟，完成小额主网交易验收。
 - 补充 RFQ 类型化数据与供应商适配、异常恢复，以及基于事件的资产核算。
 

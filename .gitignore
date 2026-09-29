@@ -7,3 +7,8 @@
 # Operator-local wallet configuration and execution inboxes
 .flow-bnb/
 *.wallet.local.json
+
+# Local phone-wallet connector build
+/wallet-mobile/node_modules/
+/wallet-mobile/dist/
+/.playwright-mcp/

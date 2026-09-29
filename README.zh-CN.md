@@ -243,7 +243,7 @@ python3 scripts/demo_handoff.py
 
 完整命令、人工确认流程、状态含义及配置见 [MCP 交易请求交接与本地开发钱包（中文）](docs/wallet-handoff.zh-CN.md)。演示使用真实进程和模拟 API/RPC，不包含真实签名、EVM 执行或大模型调用。
 
-生产钱包、RFQ 适配、真实授权与兑换模拟，以及小额主网交易验收仍需完成。回执确认数依据 RPC 节点视图计算，不等同于绝对最终性。
+已增加[币安 App 手机钱包连接页和签名器](docs/mobile-wallet.zh-CN.md)，支持扫码连接、独立人工确认和单次交易交接；模拟测试及浏览器弹窗检查通过，真实手机连接与小额主网交易仍待验收。RFQ 适配、真实授权与兑换实测仍需完成。回执确认数依据 RPC 节点视图计算，不等同于绝对最终性。
 
 开发计划见 [路线图](docs/roadmap.md)，已有验证记录见 [开发者体验报告](docs/developer-experience-report.md)。
 

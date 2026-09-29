@@ -185,3 +185,13 @@ Run `python3 scripts/demo_handoff.py` to queue a simulated trade through the rea
 MCP server, review it in the terminal, and exercise the bundled local-development
 wallet adapter plus settlement checks. No private keys or funds are required.
 See [wallet handoff](docs/wallet-handoff.md) for configuration and evidence limits.
+
+## Binance App mobile wallet
+
+`wallet-mobile/` provides a loopback QR connection page using the official Binance
+SDK and a `flow-bnb-signer-v1` executable for `execute-trade` or `approve-trade`.
+Connect the phone before preparing a fresh transaction, then confirm separately
+in the terminal, browser and phone. See the [mobile wallet guide (Chinese)](docs/mobile-wallet.zh-CN.md).
+Mock provider/RPC tests and the browser QR modal have been checked; a real phone
+connection and live approval/swap are still pending acceptance. No private keys
+are imported into Flow.

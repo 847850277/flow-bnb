@@ -103,6 +103,11 @@ that is outside your intended trust model.
 
 ## Bundled development-node wallet
 
+For Binance App, use the separate [mobile wallet bridge](mobile-wallet.zh-CN.md).
+`approve-trade --signer /absolute/adapter --rpc-url https://...` replaces
+`--wallet-config`; it cannot use `--demo`, and its success state is
+`completed_wallet`. Real phone and mainnet acceptance remain pending.
+
 `flow-bnb-wallet-rpc --config /absolute/path/dev-wallet.json` consumes the existing
 `flow-bnb-signer-v1` JSON protocol on stdin and returns confirmation ID/transaction
 hash on stdout. No key is loaded by Flow. The node owns the unlocked development
@@ -141,7 +146,7 @@ MetaMask or a production hardware-wallet integration. Those remain separate work
 
 - Actual LLM/client configuration and natural-language session validation (the demo
   client is a deterministic MCP test client).
-- A selected production wallet adapter with its own confirmation UX.
+- Real-phone acceptance of the implemented Binance App QR adapter and its confirmation UX.
 - Real authorization/swap simulation and small mainnet trade acceptance tests.
 - RFQ typed-data/vendor adapters, deeper recovery and event-based asset accounting.
 

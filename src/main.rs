@@ -37,8 +37,19 @@ enum Command {
         #[arg(long)]
         policy: PathBuf,
         /// Configuration for the bundled local development-node wallet adapter.
-        #[arg(long)]
-        wallet_config: PathBuf,
+        #[arg(long, required_unless_present = "signer", conflicts_with_all = ["signer", "rpc_url"])]
+        wallet_config: Option<PathBuf>,
+        /// Trusted external wallet adapter, including the local mobile-wallet bridge.
+        #[arg(
+            long,
+            required_unless_present = "wallet_config",
+            requires = "rpc_url",
+            conflicts_with = "demo"
+        )]
+        signer: Option<PathBuf>,
+        /// Read-only settlement RPC for an external wallet adapter.
+        #[arg(long, requires = "signer")]
+        rpc_url: Option<String>,
         /// Use deterministic API fixtures; wallet endpoint must still be a loopback dev node.
         #[arg(long)]
         demo: bool,
@@ -131,35 +142,55 @@ async fn main() -> Result<()> {
             intent_id,
             policy,
             wallet_config,
+            signer,
+            rpc_url,
             demo,
         } => {
-            let config: flow_bnb::wallet::DevWalletConfig =
-                serde_json::from_slice(&fs::read(&wallet_config)?)?;
-            config.validate()?;
+            let external_wallet = signer.is_some();
+            let (executable, rpc_url, args) = if let Some(signer) = signer {
+                anyhow::ensure!(
+                    signer.is_absolute() && signer.is_file(),
+                    "signer must be an absolute executable file path"
+                );
+                let rpc_url = rpc_url.context("external signer requires --rpc-url")?;
+                let url = url::Url::parse(&rpc_url).context("invalid settlement RPC URL")?;
+                anyhow::ensure!(
+                    matches!(url.scheme(), "http" | "https"),
+                    "settlement RPC must be HTTP(S)"
+                );
+                (signer, rpc_url, vec![])
+            } else {
+                let wallet_config =
+                    wallet_config.context("development wallet requires --wallet-config")?;
+                let config: flow_bnb::wallet::DevWalletConfig =
+                    serde_json::from_slice(&fs::read(&wallet_config)?)?;
+                config.validate()?;
+                let executable = std::env::current_exe()?.with_file_name("flow-bnb-wallet-rpc");
+                anyhow::ensure!(
+                    executable.is_file(),
+                    "build flow-bnb-wallet-rpc before approval"
+                );
+                let args = vec![
+                    "--config".into(),
+                    wallet_config.canonicalize()?.to_string_lossy().into_owned(),
+                ];
+                (executable, config.rpc_url, args)
+            };
             // Check operator terminal and trusted adapter BEFORE permanently claiming the intent.
             fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open("/dev/tty")
                 .context("approval requires an operator terminal")?;
-            let executable = std::env::current_exe()?.with_file_name("flow-bnb-wallet-rpc");
-            anyhow::ensure!(
-                executable.is_file(),
-                "build flow-bnb-wallet-rpc before approval"
-            );
             let inbox = flow_bnb::handoff::Inbox::open(handoff_dir)?;
             let mut claim = inbox.claim(&intent_id)?;
             let request = claim.intent.request.clone();
             let audit_path = claim.audit_path.clone();
-            let args = vec![
-                "--config".into(),
-                wallet_config.canonicalize()?.to_string_lossy().into_owned(),
-            ];
             let result = trade_request_command(
                 request,
                 policy,
                 audit_path.clone(),
-                Some((executable, config.rpc_url, args)),
+                Some((executable, rpc_url, args)),
                 demo,
                 Some(&mut claim),
             )
@@ -178,7 +209,14 @@ async fn main() -> Result<()> {
                 };
                 claim.record(state,"Execution did not complete; inspect the audit. A claimed intent cannot be replayed.")?;
             } else {
-                claim.record(if demo {"completed_simulation"} else {"completed_dev_node"},"Wallet submission and settlement checks completed. This bundled adapter targets a local development node.")?;
+                let state = if demo {
+                    "completed_simulation"
+                } else if external_wallet {
+                    "completed_wallet"
+                } else {
+                    "completed_dev_node"
+                };
+                claim.record(state, "Wallet submission and settlement checks completed; inspect the audit for the action kind and chain evidence.")?;
             }
             result
         }
@@ -475,6 +513,54 @@ impl postman_http::HttpTransport for TradeTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_requires_exactly_one_wallet_and_external_rpc() {
+        let base = [
+            "flow-bnb",
+            "approve-trade",
+            "--handoff-dir",
+            "/tmp/inbox",
+            "--intent-id",
+            "test",
+            "--policy",
+            "policy.json",
+        ];
+        for extra in [
+            vec!["--wallet-config", "dev.json"],
+            vec!["--wallet-config", "dev.json", "--demo"],
+            vec![
+                "--signer",
+                "/tmp/mobile-wallet",
+                "--rpc-url",
+                "https://rpc.example",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(base.iter().copied().chain(extra)).is_ok());
+        }
+        for extra in [
+            vec![],
+            vec!["--signer", "/tmp/mobile-wallet"],
+            vec!["--rpc-url", "https://rpc.example"],
+            vec![
+                "--wallet-config",
+                "dev.json",
+                "--signer",
+                "/tmp/mobile-wallet",
+                "--rpc-url",
+                "https://rpc.example",
+            ],
+            vec![
+                "--signer",
+                "/tmp/mobile-wallet",
+                "--rpc-url",
+                "https://rpc.example",
+                "--demo",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(base.iter().copied().chain(extra)).is_err());
+        }
+    }
 
     #[test]
     fn verbose_is_accepted_before_and_after_subcommands() {
