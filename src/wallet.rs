@@ -64,7 +64,12 @@ pub async fn send_with_transport<T: HttpTransport>(
         "invalid confirmation ID"
     );
     ensure!(
-        (1..=30_000).contains(&request.expires_in_ms),
+        (1..=if request.kind == "approval" {
+            300_000
+        } else {
+            30_000
+        })
+            .contains(&request.expires_in_ms),
         "invalid or expired signer deadline"
     );
     let tx = request

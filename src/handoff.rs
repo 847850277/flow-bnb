@@ -3,27 +3,30 @@
 use crate::trade::TradeRequest;
 use anyhow::{ensure, Context, Result};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
+    marker::PhantomData,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone)]
-pub struct Inbox {
+pub struct TypedInbox<T> {
     directory: PathBuf,
+    request_type: PhantomData<T>,
 }
+pub type Inbox = TypedInbox<TradeRequest>;
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Intent {
+pub struct Intent<T = TradeRequest> {
     pub schema_version: u32,
     pub id: String,
     pub created_at: String,
-    pub request: TradeRequest,
+    pub request: T,
 }
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
@@ -43,12 +46,12 @@ pub struct ExecutionSummary {
     pub buy_delta: Option<String>,
 }
 #[derive(Serialize, JsonSchema)]
-pub struct Queued {
-    pub intent: Intent,
+pub struct Queued<T = TradeRequest> {
+    pub intent: Intent<T>,
     pub status: Status,
     pub next_action: String,
 }
-impl Inbox {
+impl<T: Clone + Serialize + DeserializeOwned> TypedInbox<T> {
     pub fn open(directory: impl AsRef<Path>) -> Result<Self> {
         let directory = directory.as_ref();
         ensure!(
@@ -77,6 +80,7 @@ impl Inbox {
         }
         Ok(Self {
             directory: directory.canonicalize()?,
+            request_type: PhantomData,
         })
     }
     fn path(&self, id: &str, suffix: &str) -> Result<PathBuf> {
@@ -89,17 +93,8 @@ impl Inbox {
         );
         Ok(self.directory.join(format!("{id}.{suffix}")))
     }
-    pub fn enqueue(&self, request: TradeRequest) -> Result<Queued> {
+    pub fn enqueue(&self, request: T) -> Result<Queued<T>> {
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-        ensure!(
-            serde_json::to_vec(&request)?.len() < 8192,
-            "request too large"
-        );
-        // Do not let a client fill the operator's disk indefinitely.
-        ensure!(
-            fs::read_dir(&self.directory)?.take(4097).count() < 4096,
-            "handoff inbox full; operator must archive records"
-        );
         let entropy = format!(
             "{}:{}:{}:{}",
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
@@ -108,6 +103,34 @@ impl Inbox {
             serde_json::to_string(&request)?
         );
         let id = format!("{:x}", Sha256::digest(entropy.as_bytes()));
+        self.enqueue_with_id(request, id)
+    }
+    /// Stable IDs let callers retry queue creation, never execution.
+    pub(crate) fn enqueue_with_id(&self, request: T, id: String) -> Result<Queued<T>> {
+        ensure!(
+            serde_json::to_vec(&request)?.len() < 8192,
+            "request too large"
+        );
+        let path = self.path(&id, "intent.json")?;
+        if path.try_exists()? {
+            let intent = self.intent(&id)?;
+            ensure!(
+                serde_json::to_value(&intent.request)? == serde_json::to_value(&request)?,
+                "request ID already belongs to a different intent or configuration"
+            );
+            return Ok(Queued {
+                intent,
+                status: self.status(&id)?,
+                next_action:
+                    "Existing intent returned; never enqueue a replacement to retry execution."
+                        .into(),
+            });
+        }
+        // Do not let a client fill the operator's disk indefinitely.
+        ensure!(
+            fs::read_dir(&self.directory)?.take(4097).count() < 4096,
+            "handoff inbox full; operator must archive records"
+        );
         let intent = Intent {
             schema_version: 1,
             id: id.clone(),
@@ -118,6 +141,7 @@ impl Inbox {
         serde_json::to_writer(&mut file, &intent)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
+        File::open(&self.directory)?.sync_all()?;
         let status = Status {
             id: id.clone(),
             state: "awaiting_operator".into(),
@@ -127,14 +151,14 @@ impl Inbox {
         };
         Ok(Queued {intent,status,next_action:"An operator must run flow-bnb approve-trade with this ID and operator-owned policy/wallet configuration. The CLI prepares a fresh quote and asks for terminal confirmation; MCP cannot approve it.".into()})
     }
-    pub fn intent(&self, id: &str) -> Result<Intent> {
+    pub fn intent(&self, id: &str) -> Result<Intent<T>> {
         let path = self.path(id, "intent.json")?;
         let meta = fs::symlink_metadata(&path)?;
         ensure!(
             meta.is_file() && !meta.file_type().is_symlink() && meta.len() < 8192,
             "invalid intent file"
         );
-        let intent: Intent = serde_json::from_slice(&fs::read(path)?)?;
+        let intent: Intent<T> = serde_json::from_slice(&fs::read(path)?)?;
         ensure!(
             intent.id == id && intent.schema_version == 1,
             "intent identity mismatch"
@@ -217,11 +241,32 @@ impl Inbox {
         }
         Ok(last)
     }
-    pub fn claim(&self, id: &str) -> Result<Claim> {
+    pub fn pending(&self) -> Result<Vec<Intent<T>>> {
+        let mut pending = vec![];
+        for entry in fs::read_dir(&self.directory)?.take(4096) {
+            let name = entry?.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(id) = name.strip_suffix(".intent.json") else {
+                continue;
+            };
+            if self.journal_status(id)?.state == "awaiting_operator" {
+                pending.push(self.intent(id)?);
+            }
+        }
+        pending.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(pending)
+    }
+    pub fn claim(&self, id: &str) -> Result<Claim<T>> {
         let intent = self.intent(id)?;
         // create_new is the inter-process lock and permanent replay barrier.
         let file = create(&self.path(id, "journal.jsonl")?)
             .context("intent already claimed or cancelled; inspect status instead of retrying")?;
+        file.try_lock().context("claim journal is in use")?;
+        File::open(&self.directory)?.sync_all()?;
         let mut claim = Claim {
             intent,
             file,
@@ -236,12 +281,12 @@ impl Inbox {
         self.status(id)
     }
 }
-pub struct Claim {
-    pub intent: Intent,
+pub struct Claim<T = TradeRequest> {
+    pub intent: Intent<T>,
     pub audit_path: PathBuf,
     file: File,
 }
-impl Claim {
+impl<T> Claim<T> {
     pub fn record(&mut self, state: &str, message: &str) -> Result<()> {
         let status = Status {
             id: self.intent.id.clone(),

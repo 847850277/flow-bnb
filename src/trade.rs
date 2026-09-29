@@ -48,9 +48,15 @@ pub struct ExecutionPolicy {
     pub allowed_spenders: Vec<String>,
     #[serde(default = "default_age")]
     pub max_age_seconds: u64,
+    /// Exact ERC-20 approvals do not execute a quote. A swap needs fresh preparation.
+    #[serde(default = "default_approval_age")]
+    pub approval_max_age_seconds: u64,
 }
 fn default_age() -> u64 {
     30
+}
+fn default_approval_age() -> u64 {
+    300
 }
 impl Default for ExecutionPolicy {
     fn default() -> Self {
@@ -59,6 +65,7 @@ impl Default for ExecutionPolicy {
             allowed_routers: vec![],
             allowed_spenders: vec![],
             max_age_seconds: default_age(),
+            approval_max_age_seconds: default_approval_age(),
         }
     }
 }
@@ -370,6 +377,24 @@ pub async fn prepare_with_transport<T: HttpTransport + Clone + 'static>(
                         .push("preparation expired; obtain a fresh quote".into());
                     prepared.report.state = "blocked".into();
                 } else {
+                    // All preparation gates still run within the quote TTL. Only
+                    // the separately simulated exact approval gets longer review.
+                    if prepared
+                        .report
+                        .transaction
+                        .as_ref()
+                        .is_some_and(|tx| tx.kind == "approval")
+                    {
+                        prepared.report.max_age_seconds = policy.approval_max_age_seconds;
+                    }
+                    if started.elapsed() >= Duration::from_secs(prepared.report.max_age_seconds) {
+                        prepared.report.state = "blocked".into();
+                        prepared
+                            .report
+                            .blockers
+                            .push("prepared action expired; prepare again".into());
+                        return prepared;
+                    }
                     let binding = json!({"report": prepared.report, "transaction": transaction});
                     prepared.report.confirmation_id =
                         Some(hash(&serde_json::to_vec(&binding).unwrap()));
@@ -417,6 +442,10 @@ async fn prepare<T: HttpTransport + Clone + 'static>(
     ensure!(
         (1..=30).contains(&policy.max_age_seconds),
         "max_age_seconds must be 1..=30 (quote TTL)"
+    );
+    ensure!(
+        (1..=300).contains(&policy.approval_max_age_seconds),
+        "approval_max_age_seconds must be 1..=300"
     );
     ensure!(
         req.slippage_bps <= policy.risk.max_slippage_bps && req.slippage_bps <= 10_000,

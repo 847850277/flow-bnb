@@ -51,6 +51,8 @@ impl FlowBnbMcpServer {
             FlowTemplate::WalletSnapshot => WALLET_SNAPSHOT,
             FlowTemplate::SafeSwapPreparation => SAFE_SWAP_PREPARATION,
             FlowTemplate::TransactionReceipt => TRANSACTION_RECEIPT,
+            FlowTemplate::AgenticStage => crate::agentic::STAGE,
+            FlowTemplate::AgenticOrder => crate::agentic::ORDER,
         }
     }
 
@@ -175,6 +177,125 @@ impl FlowBnbMcpServer {
 #[tool_router]
 impl FlowBnbMcpServer {
     #[tool(
+        name = "request_agentic_execution",
+        description = "Queue one native Agentic Wallet trade for an operator. Requires a stable request_id: reuse it with identical arguments on transport retries; never create a replacement to retry a trade. Uses operator-owned configuration and local token limits. Does not submit or approve; an operator's agentic-operator terminal must prepare afresh and confirm.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn request_agentic_execution(
+        &self,
+        Parameters(args): Parameters<AgenticExecutionArgs>,
+    ) -> Result<Json<serde_json::Value>, String> {
+        agentic_inbox()?
+            .enqueue(args.request_id, args.intent)
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "get_agentic_execution",
+        description = "Read the durable state/result of a queued native trade, including order ID, receipt and actual transfer amounts. No wallet/network calls. Never retry execution when pending, unknown or settled_with_discrepancy; that state means a real trade with a discrepancy requiring review.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn get_agentic_execution(
+        &self,
+        Parameters(args): Parameters<ExecutionIntentId>,
+    ) -> Result<Json<serde_json::Value>, String> {
+        agentic_inbox()?
+            .status(&args.intent_id)
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "cancel_agentic_execution",
+        description = "Cancel a queued native trade only before an operator claims it. Does not revoke, cancel or undo a submitted on-chain order.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn cancel_agentic_execution(
+        &self,
+        Parameters(args): Parameters<ExecutionIntentId>,
+    ) -> Result<Json<serde_json::Value>, String> {
+        agentic_inbox()?
+            .cancel(&args.intent_id)
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "refresh_agentic_execution",
+        description = "Resume read-only order/receipt verification for a queued native trade that already has an order ID; updates its local report. Never submits, signs, approves or automatically retries a trade. May take up to the bounded polling deadline; do not use a new trade request as a retry.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn refresh_agentic_execution(
+        &self,
+        Parameters(args): Parameters<ExecutionIntentId>,
+    ) -> Result<Json<serde_json::Value>, String> {
+        agentic_inbox()?
+            .refresh(&args.intent_id)
+            .await
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "prepare_agentic_trade",
+        description = "Read-only native Agentic Wallet preparation through Flow: account binding, local token amount/slippage limits, on-chain balances, quote and token audit. Does not submit. Uses operator-configured FLOW_BNB_AGENTIC_CONFIG. Limits differ from legacy Web3 execution policy.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn prepare_agentic_trade(
+        &self,
+        Parameters(intent): Parameters<crate::agentic::Intent>,
+    ) -> Result<Json<serde_json::Value>, String> {
+        let c = agentic_config()?;
+        let report = crate::agentic::prepare(&c, intent)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_value(report)
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+    #[tool(
+        name = "inspect_agentic_order",
+        description = "Read-only Flow order polling and BSC receipt/Transfer-log reconciliation for an existing Agentic Wallet order. Compares reported output with actual wallet transfers. Never submits or retries a trade.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn inspect_agentic_order(
+        &self,
+        Parameters(args): Parameters<AgenticOrderArgs>,
+    ) -> Result<Json<serde_json::Value>, String> {
+        let report = crate::agentic::inspect_order(agentic_config()?, args.intent, args.order_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_value(report)
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
         name = "list_bnb_capabilities",
         description = "List validated BNB Chain workflow templates, official API surfaces, and the safety boundary for Agent use."
     )]
@@ -183,6 +304,8 @@ impl FlowBnbMcpServer {
             chain_id: "56".to_owned(),
             network: "BNB Smart Chain mainnet".to_owned(),
             templates: vec![
+                TemplateInfo::new(FlowTemplate::AgenticStage, "Native wallet checks, quotes and operator-only order submission through a local process adapter; requires agentic-trade, not generic HTTP run."),
+                TemplateInfo::new(FlowTemplate::AgenticOrder, "Bounded native order polling through the local adapter; use agentic-track or inspect_agentic_order."),
                 TemplateInfo::new(FlowTemplate::TransactionReceipt, "Track an existing transaction via read-only JSON-RPC with bounded polling and confirmation checks; requires the flow-bnb receipt adapter."),
                 TemplateInfo::new(
                     FlowTemplate::RwaDiscovery,
@@ -208,7 +331,8 @@ impl FlowBnbMcpServer {
             safety_boundary: vec![
                 "MCP tools never accept Binance API credentials or wallet private keys; receipt reports omit the provider RPC URL.".to_owned(),
                 "MCP may queue intents for operator review, but cannot approve them. Generated flows do not sign or broadcast.".to_owned(),
-                "Execution policy requires BSC, size/slippage/impact limits, successful simulation, and explicit operator confirmation.".to_owned(),
+                "Legacy Web3 execution policy requires BSC, size/slippage/impact limits, successful simulation, and explicit operator confirmation.".to_owned(),
+                "Native Agentic Wallet uses separate token-quantity/slippage limits and account/balance/audit gates; it does not inherit legacy USD, price-impact or simulation guarantees. Native execution tools durably queue, query, cancel unclaimed requests and refresh existing orders; agentic-operator alone submits after fresh terminal confirmation.".to_owned(),
                 "Use an isolated signer or Binance Agentic Wallet only after policy approval.".to_owned(),
             ],
         })
@@ -405,7 +529,7 @@ impl FlowBnbMcpServer {
                 ),
                 PlanStage::new(
                     "sign",
-                    "Hand approved calldata to an isolated signer or Agentic Wallet",
+                    "Hand approved calldata to an isolated signer; native Agentic orders use a separate workflow",
                     "external",
                 ),
                 PlanStage::new(
@@ -426,7 +550,7 @@ impl ServerHandler for FlowBnbMcpServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("flow-bnb-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Start with list_bnb_capabilities. Generate and validate a template, evaluate the trade policy, then build an execution plan. Never ask for private keys or API secrets. This MCP prepares and simulates trades and can track an existing transaction with watch_transaction, but does not sign or broadcast.",
+                "Start with list_bnb_capabilities. Generate and validate a template, evaluate the trade policy, then build an execution plan. Never ask for private keys or API secrets. For native Agentic Wallet use prepare_agentic_trade and request_agentic_execution with a stable request_id, then get_agentic_execution to retrieve the operator result. Never generate a replacement ID to retry a submitted or unknown order. The operator terminal authorizes execution; this MCP does not sign or broadcast.",
             )
     }
 }
@@ -434,6 +558,8 @@ impl ServerHandler for FlowBnbMcpServer {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FlowTemplate {
+    AgenticStage,
+    AgenticOrder,
     RwaDiscovery,
     WalletSnapshot,
     SafeSwapPreparation,
@@ -556,6 +682,8 @@ mod tests {
     #[test]
     fn all_embedded_templates_compile() {
         for template in [
+            FlowTemplate::AgenticStage,
+            FlowTemplate::AgenticOrder,
             FlowTemplate::RwaDiscovery,
             FlowTemplate::WalletSnapshot,
             FlowTemplate::SafeSwapPreparation,
@@ -582,4 +710,26 @@ mod tests {
         assert!(server.save("../escape.http.yml", &yaml, false).is_err());
         assert!(server.save("/tmp/escape.http.yml", &yaml, false).is_err());
     }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgenticOrderArgs {
+    pub intent: crate::agentic::Intent,
+    pub order_id: String,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgenticExecutionArgs {
+    /// Stable caller-generated key, reused for retries of this same intent.
+    pub request_id: String,
+    pub intent: crate::agentic::Intent,
+}
+fn agentic_inbox() -> Result<crate::agentic_handoff::Inbox, String> {
+    crate::agentic_handoff::Inbox::open(agentic_config()?).map_err(|e| e.to_string())
+}
+fn agentic_config() -> Result<crate::agentic::Config, String> {
+    let p = std::env::var("FLOW_BNB_AGENTIC_CONFIG")
+        .map_err(|_| "operator must configure FLOW_BNB_AGENTIC_CONFIG".to_string())?;
+    crate::agentic::Config::read(Path::new(&p)).map_err(|e| e.to_string())
 }

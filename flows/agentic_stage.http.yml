@@ -1,0 +1,27 @@
+schema_version: 1
+# Internal local-process adapter. No HTTP request is sent to this synthetic URL.
+flow:
+  name: agentic-wallet-stage
+  inputs:
+    - name: command
+  steps:
+    - id: wallet
+      request:
+        kind: http
+        method: POST
+        url: {literal: 'https://agentic-wallet.invalid/local'}
+        body:
+          kind: json
+          value: {input: command}
+      checks:
+        - kind: status
+          equals: 200
+        - kind: jsonpath
+          path: $.success
+          equals: {literal: true}
+      exports:
+        - name: data
+          path: $.data
+  outputs:
+    - name: data
+      value: {output: {step: wallet, name: data}}

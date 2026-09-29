@@ -1,0 +1,34 @@
+schema_version: 1
+# Read-only order polling via the local Agentic Wallet adapter; never submits.
+flow:
+  name: agentic-wallet-order
+  inputs:
+    - name: command
+  steps:
+    - id: wait-order
+      kind: repeat_until
+      max_iterations: 60
+      interval_ms: 2000
+      timeout_ms: 120000
+      until:
+        eq: [{output: {step: order, name: status}}, {literal: FINISHED}]
+      fail_when:
+        eq: [{output: {step: order, name: status}}, {literal: FAILED}]
+      steps:
+        - id: order
+          request:
+            kind: http
+            method: POST
+            url: {literal: 'https://agentic-wallet.invalid/local'}
+            body:
+              kind: json
+              value: {input: command}
+          checks:
+            - kind: status
+              equals: 200
+            - kind: jsonpath
+              path: $.success
+              equals: {literal: true}
+          exports:
+            - name: status
+              path: $.data.list[0].status

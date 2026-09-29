@@ -140,6 +140,11 @@ async fn malformed_policy_and_request_fail_without_network() {
     let mut p = policy();
     p.max_age_seconds = 31;
     cases.push((request(), p));
+    for age in [0, 301] {
+        let mut p = policy();
+        p.approval_max_age_seconds = age;
+        cases.push((request(), p));
+    }
     let mut r = request();
     r.wallet_address = "0x0".into();
     cases.push((r, policy()));
@@ -294,6 +299,7 @@ async fn approval_uses_quoted_vendor_and_exact_amount_then_stops() {
     let id = prepared.report().confirmation_id.clone().unwrap();
     let signed = prepared.authorize(&id).unwrap();
     assert_eq!(signed.kind, "approval");
+    assert!(signed.expires_in_ms > 30_000 && signed.expires_in_ms <= 300_000);
     assert_eq!(signed.transaction["to"], SELL);
     let requests = script.requests.lock().unwrap();
     let url = url::Url::parse(&requests[3].url).unwrap();
@@ -580,4 +586,25 @@ async fn balance_fallback_wrong_chain_or_invalid_abi_cannot_become_zero() {
         api.done();
         assert!(rpc.0.lock().unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn approval_review_outlives_quote_but_respects_its_own_deadline() {
+    let mut approval = approval_steps(approve_data());
+    approval.push(("simulate", sim()));
+    let mut p = policy();
+    p.max_age_seconds = 1;
+    let long = prepare_with_transport(request(), p.clone(), Script::new(approval.clone())).await;
+    let swap = prepare_with_transport(request(), p.clone(), Script::new(steps())).await;
+    p.approval_max_age_seconds = 1;
+    let short = prepare_with_transport(request(), p, Script::new(approval)).await;
+    let long_id = long.report().confirmation_id.clone().unwrap();
+    let short_id = short.report().confirmation_id.clone().unwrap();
+    let swap_id = swap.report().confirmation_id.clone().unwrap();
+    assert_eq!(long.report().max_age_seconds, 300);
+    assert_eq!(swap.report().max_age_seconds, 1);
+    tokio::time::sleep(std::time::Duration::from_millis(1050)).await;
+    assert!(long.authorize(&long_id).unwrap().expires_in_ms > 30_000);
+    assert!(short.authorize(&short_id).is_err());
+    assert!(swap.authorize(&swap_id).is_err());
 }

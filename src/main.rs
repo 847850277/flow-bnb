@@ -28,6 +28,74 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Operate queued native trades; every order requires fresh terminal confirmation.
+    AgenticOperator {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long, required_unless_present = "watch", conflicts_with = "watch")]
+        intent_id: Option<String>,
+        /// Keep this terminal open to review incoming MCP intents, oldest first.
+        #[arg(long)]
+        watch: bool,
+    },
+    /// Read a queued native trade's status, optionally refreshing its existing order.
+    AgenticExecution {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long)]
+        intent_id: String,
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Prepare a native Agentic Wallet order through Flow; --execute requests terminal confirmation.
+    AgenticTrade {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        report: PathBuf,
+        #[arg(long)]
+        execute: bool,
+    },
+    /// Inspect a previously submitted native order, including receipt-based settlement.
+    AgenticInspect {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        order_id: String,
+        #[arg(long)]
+        report: PathBuf,
+    },
+    /// Resume read-only order and settlement tracking; never submits another order.
+    AgenticTrack {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long)]
+        report: PathBuf,
+    },
     /// Inspect and execute one queued intent after fresh preparation and terminal confirmation.
     ApproveTrade {
         #[arg(long, env = "FLOW_BNB_HANDOFF_DIR")]
@@ -39,7 +107,7 @@ enum Command {
         /// Configuration for the bundled local development-node wallet adapter.
         #[arg(long, required_unless_present = "signer", conflicts_with_all = ["signer", "rpc_url"])]
         wallet_config: Option<PathBuf>,
-        /// Trusted external wallet adapter, including the local mobile-wallet bridge.
+        /// Trusted external wallet adapter implementing the signer protocol.
         #[arg(
             long,
             required_unless_present = "wallet_config",
@@ -124,6 +192,95 @@ async fn main() -> Result<()> {
             .map_err(|_| anyhow::anyhow!("could not initialize verbose logging"))?;
     }
     match cli.command {
+        Command::AgenticOperator {
+            config,
+            intent_id,
+            watch,
+        } => {
+            let inbox =
+                flow_bnb::agentic_handoff::Inbox::open(flow_bnb::agentic::Config::read(&config)?)?;
+            if let Some(id) = intent_id {
+                let status = inbox.approve(&id).await?;
+                println!("{}", serde_json::to_string_pretty(&status)?);
+                anyhow::ensure!(
+                    operator_finished(&status),
+                    "operator stopped; inspect this intent, do not resubmit"
+                );
+            } else if watch {
+                eprintln!("Waiting for queued native trades. Each order requires CONFIRM in this terminal. Ctrl-C stops the operator; queued intents remain durable.");
+                loop {
+                    if let Some(id) = inbox.pending()?.first() {
+                        let status = inbox.approve(id).await?;
+                        println!("{}", serde_json::to_string_pretty(&status)?);
+                        anyhow::ensure!(
+                            operator_finished(&status),
+                            "operator stopped; inspect this intent, do not resubmit"
+                        );
+                        anyhow::ensure!(status["state"] != "settled_with_discrepancy", "settled with discrepancy; operator paused for review, no automatic retry");
+                    } else {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Command::AgenticExecution {
+            config,
+            intent_id,
+            refresh,
+        } => {
+            let inbox =
+                flow_bnb::agentic_handoff::Inbox::open(flow_bnb::agentic::Config::read(&config)?)?;
+            let status = if refresh {
+                inbox.refresh(&intent_id).await?
+            } else {
+                inbox.status(&intent_id)?
+            };
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            Ok(())
+        }
+        Command::AgenticTrade {
+            config,
+            request,
+            report,
+            execute,
+        } => {
+            let c = flow_bnb::agentic::Config::read(&config)?;
+            let i = serde_json::from_slice(&fs::read(request)?)?;
+            let r = flow_bnb::agentic::run(c, i, &report, execute).await?;
+            print_agentic_report(&r)?;
+            anyhow::ensure!(
+                r.has_settlement() || matches!(r.state.as_str(), "ready" | "cancelled"),
+                "Agentic Wallet workflow stopped; inspect report"
+            );
+            Ok(())
+        }
+        Command::AgenticInspect {
+            config,
+            request,
+            order_id,
+            report,
+        } => {
+            let c = flow_bnb::agentic::Config::read(&config)?;
+            let i = serde_json::from_slice(&fs::read(request)?)?;
+            let r = flow_bnb::agentic::inspect(c, i, order_id, &report).await?;
+            print_agentic_report(&r)?;
+            anyhow::ensure!(
+                r.has_settlement(),
+                "existing order not verified; inspect report"
+            );
+            Ok(())
+        }
+        Command::AgenticTrack { config, report } => {
+            let r = flow_bnb::agentic::track(flow_bnb::agentic::Config::read(&config)?, &report)
+                .await?;
+            print_agentic_report(&r)?;
+            anyhow::ensure!(
+                r.has_settlement(),
+                "order not verified; inspect report; do not resubmit"
+            );
+            Ok(())
+        }
         Command::ReviewTrade {
             handoff_dir,
             intent_id,
@@ -292,6 +449,21 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn operator_finished(status: &serde_json::Value) -> bool {
+    matches!(
+        status["state"].as_str(),
+        Some("completed" | "settled_with_discrepancy" | "cancelled")
+    )
+}
+
+fn print_agentic_report(r: &flow_bnb::agentic::Report) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(r)?);
+    if r.state == "settled_with_discrepancy" {
+        eprintln!("Order settled with an amount discrepancy; review settlement. Do not resubmit. Any existing submission lock is retained.");
+    }
+    Ok(())
 }
 
 fn load_plan(path: &PathBuf) -> Result<postman_flow::FlowPlan> {
@@ -531,7 +703,7 @@ mod tests {
             vec!["--wallet-config", "dev.json", "--demo"],
             vec![
                 "--signer",
-                "/tmp/mobile-wallet",
+                "/tmp/external-signer",
                 "--rpc-url",
                 "https://rpc.example",
             ],
@@ -540,19 +712,19 @@ mod tests {
         }
         for extra in [
             vec![],
-            vec!["--signer", "/tmp/mobile-wallet"],
+            vec!["--signer", "/tmp/external-signer"],
             vec!["--rpc-url", "https://rpc.example"],
             vec![
                 "--wallet-config",
                 "dev.json",
                 "--signer",
-                "/tmp/mobile-wallet",
+                "/tmp/external-signer",
                 "--rpc-url",
                 "https://rpc.example",
             ],
             vec![
                 "--signer",
-                "/tmp/mobile-wallet",
+                "/tmp/external-signer",
                 "--rpc-url",
                 "https://rpc.example",
                 "--demo",

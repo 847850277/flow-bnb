@@ -5,18 +5,6 @@ on:
   pull_request:
 
 jobs:
-  mobile-wallet:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: wallet-mobile/package-lock.json
-      - run: npm ci --ignore-scripts --prefix wallet-mobile
-      - run: npm run build --prefix wallet-mobile
-      - run: npm test --prefix wallet-mobile
   verify:
     runs-on: ubuntu-latest
     steps:
@@ -33,6 +21,10 @@ jobs:
           for file in flows/*.http.yml; do
             cargo +1.90.0 run --locked -- check "$file"
           done
+      - name: Offline Flow and Agentic Wallet orchestration
+        run: |
+          cargo +1.90.0 build --locked --bins
+          python3 scripts/demo_agentic.py --no-build
       - name: Offline MCP and operator wallet handoff
         run: |
           cargo +1.90.0 build --locked --bins

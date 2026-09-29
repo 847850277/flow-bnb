@@ -13,5 +13,6 @@
   },
   "allowed_routers": [],
   "allowed_spenders": [],
-  "max_age_seconds": 30
+  "max_age_seconds": 30,
+  "approval_max_age_seconds": 300
 }
