@@ -121,8 +121,11 @@ arm64 (Ubuntu 24.04 / glibc 2.39+); Linux requires OpenSSL 3 runtime libraries.
 Native Windows and musl/Alpine are unsupported. WSL-to-Windows client registration
 is not implemented. A local build does not validate every host or client UI.
 
-Workflow dispatch produces artifacts. A matching `v<Cargo version>` tag also
-creates a **draft** release. Cargo/npm versions must match; bump both when binary
+Workflow dispatch produces artifacts. A matching `v<Cargo version>` tag attaches
+the assets to an existing release, preserving its draft/published state, or creates
+a **draft** release when none exists. This supports creating the release and tag
+together in the GitHub UI. Existing assets are never overwritten; use a new version
+when their contents change. Cargo/npm versions must match; bump both when binary
 contents change (installed version contents are immutable). Publish all assets:
 
 - `flow-bnb-desktop-<version>.tgz`
