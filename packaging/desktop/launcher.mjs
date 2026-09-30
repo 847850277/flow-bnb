@@ -66,6 +66,14 @@ export function prepare(root = packageRoot, home = locations().home, key = platf
     }
   }
   checkedFile(binary, digest);
+  for (const [name, checksum] of Object.entries(manifest.scripts || {})) {
+    if (!/^[a-z0-9_-]+\.sh$/.test(name)) throw new Error('安装包包含非法脚本路径');
+    const input = path.join(root, 'scripts', name);
+    const target = path.join(versionDir, name);
+    checkedFile(input, checksum);
+    if (write && !fs.existsSync(target)) publish(target, fs.readFileSync(input), 0o600);
+    checkedFile(target, checksum);
+  }
   return { ...dirs, binary };
 }
 export async function main(args = process.argv.slice(2)) {

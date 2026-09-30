@@ -28,6 +28,41 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Advance a persisted entry/exit cycle once. Only --execute can submit orders.
+    CycleStep {
+        file: PathBuf,
+        #[arg(long)]
+        run_id: String,
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long = "input", value_name = "NAME=VALUE")]
+        inputs: Vec<String>,
+        #[arg(long)]
+        execute: bool,
+    },
+    /// Read a persisted cycle locally, without querying or executing wallet operations.
+    CycleStatus {
+        #[arg(long)]
+        run_id: String,
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+        #[arg(long)]
+        phase_only: bool,
+    },
+    /// Run the linked-stock demonstration with synthetic quotes and receipts, no wallet.
+    CycleReplay {
+        file: PathBuf,
+        #[arg(long = "input", value_name = "NAME=VALUE")]
+        inputs: Vec<String>,
+    },
     /// Prepare the private Node runtime for the desktop installer, without wallet access.
     PrepareRuntime {
         #[arg(
@@ -398,6 +433,38 @@ async fn main() -> Result<()> {
         Command::StrategyRevoke { config, id } => {
             let c = flow_bnb::agentic::Config::read(&config)?;
             println!("{}", flow_bnb::autonomy::revoke(&c, &id)?);
+            Ok(())
+        }
+        Command::CycleStep {
+            file,
+            run_id,
+            config,
+            inputs,
+            execute,
+        } => {
+            let c = flow_bnb::agentic::Config::read(&config)?;
+            let result =
+                flow_bnb::cycle::step(c, load_strategy(&file, inputs)?, &run_id, execute).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Command::CycleStatus {
+            run_id,
+            config,
+            phase_only,
+        } => {
+            let c = flow_bnb::agentic::Config::read(&config)?;
+            let result = flow_bnb::cycle::status(&c, &run_id)?;
+            if phase_only {
+                println!("{}", result["phase"].as_str().context("missing phase")?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            Ok(())
+        }
+        Command::CycleReplay { file, inputs } => {
+            let result = flow_bnb::cycle::replay(load_strategy(&file, inputs)?).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
         Command::StrategyRun {

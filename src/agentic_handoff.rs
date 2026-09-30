@@ -305,6 +305,18 @@ impl Inbox {
         self.status(id)
     }
 
+    pub(crate) fn status_for_request(&self, request_id: &str) -> Result<Option<Value>> {
+        let id = Self::request_key(request_id)?;
+        if !self
+            .directory
+            .join(format!("{id}.intent.json"))
+            .try_exists()?
+        {
+            return Ok(None);
+        }
+        self.status(&id).map(Some)
+    }
+
     pub fn pending(&self) -> Result<Vec<String>> {
         Ok(self.queue.pending()?.into_iter().map(|i| i.id).collect())
     }

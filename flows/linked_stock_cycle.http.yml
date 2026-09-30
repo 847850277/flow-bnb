@@ -1,0 +1,188 @@
+schema_version: 1
+# Monitor NVDAon, enter AAPLon after a 2% drop, exit after a 2% increase.
+# All thresholds and branching live in this file. cycle-step supplies persisted context.
+# NVDA changes use the implicit price of a fixed-size executable quote, not a stock oracle.
+flow:
+  name: nvda-signal-apple-round-trip
+  inputs:
+    - name: entry_intent
+      default:
+        from_token: '0x55d398326f99059fF775485246999027B3197955'
+        to_token: '0x390a684ef9cade28a7ad0dfa61ab1eb3842618c4'
+        amount: '5'
+        slippage_bps: 50
+    - name: signal_probe
+      default:
+        intent:
+          from_token: '0x55d398326f99059fF775485246999027B3197955'
+          to_token: '0xa9ee28c80f960b889dfbd1902055218cba016f75'
+          amount: '5'
+          slippage_bps: 50
+        token:
+          address: '0xa9ee28c80f960b889dfbd1902055218cba016f75'
+          symbol: NVDAon
+          decimals: 18
+    - name: entry_change_bps
+      default: -200
+    - name: take_profit_bps
+      default: 200
+    # Owned by the cycle runner. Do not override this input when starting a cycle.
+    - name: cycle_context
+      default:
+        phase: initializing
+        baseline_receive: '0'
+        entry_cost: '0'
+        exit_intent: {}
+  steps:
+    - id: context
+      name: Read the current strategy phase and confirmed position
+      request:
+        kind: http
+        method: POST
+        url: {literal: 'https://flow-bnb.invalid/strategy/context'}
+        body:
+          kind: json
+          value: {input: cycle_context}
+      checks:
+        - {kind: status, equals: 200}
+        - {kind: jsonpath, path: '$.success', equals: {literal: true}}
+      exports:
+        - {name: phase, path: '$.data.phase'}
+        - {name: baseline_receive, path: '$.data.baseline_receive'}
+        - {name: entry_cost, path: '$.data.entry_cost'}
+        - {name: exit_intent, path: '$.data.exit_intent'}
+    - id: observe_nvda
+      name: Query NVDAon without buying it
+      when:
+        in: [{output: {step: context, name: phase}}, {literal: [initializing, waiting_entry]}]
+      request:
+        kind: http
+        method: POST
+        url: {literal: 'https://flow-bnb.invalid/strategy/observe-quote'}
+        body:
+          kind: json
+          value: {input: signal_probe}
+      checks:
+        - {kind: status, equals: 200}
+        - {kind: jsonpath, path: '$.success', equals: {literal: true}}
+      exports:
+        - {name: receive, path: '$.data.toCoinAmount'}
+    - id: entry_condition
+      name: Has NVDAon's quote-implied price fallen at least 2% from startup?
+      when:
+        eq: [{output: {step: context, name: phase}}, {literal: waiting_entry}]
+      request:
+        kind: http
+        method: POST
+        url: {literal: 'https://flow-bnb.invalid/strategy/relative-change'}
+        body:
+          kind: json
+          value:
+            object:
+              current:
+                object:
+                  numerator: {literal: '1'}
+                  denominator: {output: {step: observe_nvda, name: receive}}
+              baseline:
+                object:
+                  numerator: {literal: '1'}
+                  denominator: {output: {step: context, name: baseline_receive}}
+              operator: {literal: lte}
+              threshold_bps: {input: entry_change_bps}
+      checks:
+        - {kind: status, equals: 200}
+        - {kind: jsonpath, path: '$.success', equals: {literal: true}}
+      exports:
+        - {name: matched, path: '$.data.matched'}
+        - {name: change_percent, path: '$.data.change_percent'}
+    - id: buy_apple
+      name: Select the AAPLon entry when the NVDAon signal matches
+      when:
+        eq: [{output: {step: context, name: phase}}, {literal: waiting_entry}]
+      request:
+        kind: http
+        method: POST
+        url: {literal: 'https://flow-bnb.invalid/strategy/decision'}
+        body:
+          kind: json
+          value:
+            object:
+              triggered: {output: {step: entry_condition, name: matched}}
+              intent: {input: entry_intent}
+      checks:
+        - {kind: status, equals: 200}
+        - {kind: jsonpath, path: '$.success', equals: {literal: true}}
+    - id: quote_position_exit
+      name: Quote only the AAPLon actually received in this cycle
+      when:
+        eq: [{output: {step: context, name: phase}}, {literal: holding}]
+      request:
+        kind: http
+        method: POST
+        url: {literal: 'https://flow-bnb.invalid/strategy/quote'}
+        body:
+          kind: json
+          value: {output: {step: context, name: exit_intent}}
+      checks:
+        - {kind: status, equals: 200}
+        - {kind: jsonpath, path: '$.success', equals: {literal: true}}
+      exports:
+        - {name: receive, path: '$.data.toCoinAmount'}
+    - id: exit_condition
+      name: Does the executable exit quote exceed actual entry cost by 2%?
+      when:
+        eq: [{output: {step: context, name: phase}}, {literal: holding}]
+      request:
+        kind: http
+        method: POST
+        url: {literal: 'https://flow-bnb.invalid/strategy/relative-change'}
+        body:
+          kind: json
+          value:
+            object:
+              current:
+                object:
+                  numerator: {output: {step: quote_position_exit, name: receive}}
+                  denominator: {literal: '1'}
+              baseline:
+                object:
+                  numerator: {output: {step: context, name: entry_cost}}
+                  denominator: {literal: '1'}
+              operator: {literal: gte}
+              threshold_bps: {input: take_profit_bps}
+      checks:
+        - {kind: status, equals: 200}
+        - {kind: jsonpath, path: '$.success', equals: {literal: true}}
+      exports:
+        - {name: matched, path: '$.data.matched'}
+        - {name: change_percent, path: '$.data.change_percent'}
+    - id: sell_apple
+      name: Select one exit for the confirmed position
+      when:
+        eq: [{output: {step: context, name: phase}}, {literal: holding}]
+      request:
+        kind: http
+        method: POST
+        url: {literal: 'https://flow-bnb.invalid/strategy/decision'}
+        body:
+          kind: json
+          value:
+            object:
+              triggered: {output: {step: exit_condition, name: matched}}
+              intent: {output: {step: context, name: exit_intent}}
+      checks:
+        - {kind: status, equals: 200}
+        - {kind: jsonpath, path: '$.success', equals: {literal: true}}
+  outputs:
+    - name: phase
+      value: {output: {step: context, name: phase}}
+    - name: signal_receive
+      value: {coalesce: [{output: {step: observe_nvda, name: receive}}, {literal: null}]}
+    - name: entry_condition_met
+      value: {coalesce: [{output: {step: entry_condition, name: matched}}, {literal: false}]}
+    - name: exit_condition_met
+      value: {coalesce: [{output: {step: exit_condition, name: matched}}, {literal: false}]}
+    - name: change_percent
+      value: {coalesce: [{output: {step: entry_condition, name: change_percent}}, {output: {step: exit_condition, name: change_percent}}, {literal: null}]}
+    - name: exit_quote_receive
+      value: {coalesce: [{output: {step: quote_position_exit, name: receive}}, {literal: null}]}

@@ -45,6 +45,8 @@ cargo run --locked -- agentic-trade \
 | `cancel_agentic_execution` | 取消尚未开始的旧队列请求；执行工具通常立即启动，不能撤回已提交订单 |
 | `refresh_agentic_execution` | 恢复已有订单的只读核对 |
 | `inspect_agentic_order` | 核对其他入口已提交的订单 |
+| `step_bnb_cycle` / `get_bnb_cycle` | 推进或查询保存的跨资产流程；`execute=true` 可触发真实交易，默认仅预览 |
+| `replay_bnb_cycle` | 使用合成报价和回执运行 YAML，无需钱包，不访问实盘 |
 | `run_bnb_strategy` | 只读求值保存的条件策略 |
 | `request_bnb_strategy_execution` | 条件成立时直接启动一次真实交易，使用相同的结果查询工具 |
 
@@ -80,6 +82,12 @@ cargo run --locked -- strategy-run flows/stock_strategy.http.yml \
 策略使用标准 Flow YAML。内置本地端点 `https://flow-bnb.invalid/strategy/quote` 接收交易意图、返回原生报价；`compare` 接收十进制字符串 `left` / `right` 和 `operator`（eq/gt/gte/lt/lte）；`rwa-spread` 接收 RWA 价格数组、监控代币、交易意图、比较符、带符号的 bp 阈值和最大价格年龄；`decision` 接收 `triggered` 和 `intent`。这些 POST 由本地适配器处理。也允许官方 Web3 的 RWA 平台、搜索、价格和钱包余额 GET 查询，相关步骤需要 API Key。其他网络地址、文件请求体、认证注入及直接下单操作会被拒绝。
 
 每次最多 30 秒、32 次请求、一个交易决策；YAML 上限 64 KiB、输入上限 16 KiB。试运行使用实时只读数据，不是历史回测，也不会启动常驻监控或定时任务。
+
+## 跨资产开仓与退出
+
+v0.3.0 提供 `linked_stock_cycle` 模板和 `cycle-step` / `cycle-status` / `cycle-replay` 命令。YAML 定义观察对象和买卖条件；执行器保存基准、阶段、实际成本与到账数量，完成一轮后结束。`scripts/run-cycle.sh` 只负责定时调用，安装包也附带该脚本。
+
+新增本地操作 `observe-quote` 支持只读观察另一种代币，`relative-change` 使用精确比例比较，`context` 承接执行器提供的阶段和持仓信息。完整数据口径、WorkBuddy 提示词和安装包命令见 [跨资产流程演示](linked-stock-cycle-demo.md)。
 
 ## 可选的策略预算
 

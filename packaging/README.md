@@ -1,7 +1,7 @@
 # Multi-client desktop distribution
 
 The package contains compiled Flow binaries (MCP and engine together), templates,
-and a dependency-free Node launcher. No Rust compilation, npm postinstall hook,
+a polling script and a dependency-free Node launcher. No Rust compilation, npm postinstall hook,
 private key or credential is shipped. JSONC/TOML parsers are bundled from locked
 maintainer dependencies. The installer never changes client tool-approval policy.
 
@@ -89,10 +89,15 @@ wallet. Disconnect does not recall already submitted orders.
 Update a connector by importing the new release bundle and reconnecting MCP, or
 rerun the new universal installer for a registered client. When connected,
 `get_bnb_connection` reports `execution_mode: "direct"` and
-`confirmation_required: false` in v0.2.0. Historical `agentic-*.lock` and
+`confirmation_required: false` since v0.2.0. Historical `agentic-*.lock` and
 `halted.json` files are preserved but no longer block execution. Startup never
 drains old queued requests. Request deduplication and record-write synchronization
 remain in place.
+
+Since v0.3.0, the installer also verifies and stores `run-cycle.sh` beside the
+versioned binary. The script uses that binary directly and only schedules cycle
+commands; it does not implement price conditions. See the [linked-stock demo](../docs/linked-stock-cycle-demo.md)
+for commands using the existing installed workspace.
 
 Registration preserves unrelated settings and JSONC/TOML comments. Existing files
 are backed up with private permissions before atomic replacement. Repeated setup
@@ -150,10 +155,10 @@ contents change (installed version contents are immutable). Publish all assets:
 
 Public links use a fixed GitHub release version. There is no assumed npm registry
 publication. Public repository/release publication and marketplace submission are
-separate actions. [v0.2.0](https://github.com/847850277/flow-bnb/releases/tag/v0.2.0)
-is published with all six assets. Four-platform builds, packaged MCP acceptance
-and public download/checksum verification passed. These automated checks do not
-establish UI acceptance in every supported client or a live-trade test of v0.2.0.
+separate actions. [v0.3.0](https://github.com/847850277/flow-bnb/releases/tag/v0.3.0)
+distributes all six assets. Packaged MCP acceptance includes generation, saving
+and synthetic replay of the cross-asset cycle. Automated checks do not establish
+UI acceptance in every supported client or a live-trade test of the new cycle.
 
 ## Primary configuration references
 

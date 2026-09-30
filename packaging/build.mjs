@@ -28,7 +28,7 @@ await build({ entryPoints: [path.join(repo, 'packaging/desktop/clients.mjs')], o
 fs.copyFileSync(path.join(repo, 'LICENSE'), path.join(dest, 'LICENSE'));
 fs.mkdirSync(path.join(dest, 'flows'));
 const sha = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-const manifest = { version: pkg.version, binaries: {}, flows: {} };
+const manifest = { version: pkg.version, binaries: {}, flows: {}, scripts: {} };
 for (const key of platforms) {
   const to = path.join(dest, 'native', key, 'flow-bnb');
   fs.mkdirSync(path.dirname(to), { recursive: true });
@@ -38,6 +38,11 @@ for (const key of platforms) {
 for (const file of fs.readdirSync(path.join(repo, 'flows')).filter(f => f.endsWith('.http.yml')).sort()) {
   const to = path.join(dest, 'flows', file);
   fs.copyFileSync(path.join(repo, 'flows', file), to); manifest.flows[file] = sha(to);
+}
+fs.mkdirSync(path.join(dest, 'scripts'));
+for (const file of ['run-cycle.sh']) {
+  const to = path.join(dest, 'scripts', file);
+  fs.copyFileSync(path.join(repo, 'scripts', file), to); manifest.scripts[file] = sha(to);
 }
 fs.writeFileSync(path.join(dest, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
 function run(cmd, args, cwd) {
@@ -59,12 +64,12 @@ fs.mkdirSync(connector);
 const json = (file, data) => fs.writeFileSync(path.join(connector, file), JSON.stringify(data, null, 2) + '\n');
 json('connector-meta.json', {
   name: 'Flow BNB', name_zh: 'Flow BNB', name_en: 'Flow BNB',
-  description: 'Create auditable stock-token strategies and execute within your wallet authorization.',
-  description_zh: '用自然语言创建股票代币策略，检查报价、执行授权范围内的交易并核对到账。首次连接自动安装所需程序并引导钱包登录。',
-  description_en: 'Create stock-token strategies, check quotes, execute authorized trades and reconcile settlement. First connection installs dependencies and pairs your wallet.',
+  description: 'Turn natural language into editable YAML stock-token workflows with persistent execution and settlement tracking.',
+  description_zh: '将自然语言转为可编辑的 YAML 交易流程：跨资产条件、持仓衔接和止盈退出。支持模拟演示、真实交易和到账核对。',
+  description_en: 'Turn natural language into editable YAML workflows with cross-asset conditions, position tracking and exits. Preview with simulation or execute real trades.',
   source: 'flow-bnb', type: 'mcp', version: pkg.version, minWorkbuddyVersion: '5.0.0',
-  examples_zh: ['创建一个满足报价条件才买入 AAPLon 的策略，先试运行', '查看已授权策略的执行记录和实际到账'],
-  examples_en: ['Create an AAPLon quote-threshold strategy and preview it', 'Show my authorized strategy execution and settlement']
+  examples_zh: ['创建英伟达报价跌 2% 后买入苹果、持仓可卖报价涨 2% 后退出的 YAML 策略，先模拟演示', '查看这轮策略的阶段、实际到账数量和执行结果'],
+  examples_en: ['Create YAML to buy AAPLon after a 2% NVDAon quote-price drop and exit at a 2% gain; simulate first', 'Show this workflow cycle, received inventory and execution results']
 });
 json('mcp.json', { preAuth: 'cli', mcpServers: { 'flow-bnb': {
   type: 'stdio', command, args: [...prefix, 'mcp'], runtime: { type: 'node', version: '22' },

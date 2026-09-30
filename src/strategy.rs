@@ -261,13 +261,19 @@ impl HttpTransport for Backend {
         r: Request,
         options: RequestOptions,
     ) -> Result<HttpResponse, HttpError> {
-        if r.url == format!("{PREFIX}quote") {
+        if r.url == format!("{PREFIX}quote") || r.url == format!("{PREFIX}observe-quote") {
             let result = async {
-                let RequestBody::Json(body) = r.body else {
+                let RequestBody::Json(ref body) = r.body else {
                     bail!("expected JSON intent")
                 };
-                let i: Intent = serde_json::from_str(&body)?;
-                agentic::strategy_quote(&self.config, &i).await
+                if r.url.ends_with("/observe-quote") {
+                    let o: crate::strategy_ops::Observation = serde_json::from_str(body)?;
+                    let c = crate::strategy_ops::observation_config(&self.config, &o)?;
+                    agentic::strategy_quote(&c, &o.intent).await
+                } else {
+                    let i: Intent = serde_json::from_str(body)?;
+                    agentic::strategy_quote(&self.config, &i).await
+                }
             }
             .await
             .map_err(|_| {
@@ -320,6 +326,9 @@ fn destination(r: &Request) -> Result<&'static str> {
         );
         return match &r.url[PREFIX.len()..] {
             "quote" => Ok("quote"),
+            "observe-quote" => Ok("observe-quote"),
+            "relative-change" => Ok("relative-change"),
+            "context" => Ok("context"),
             "compare" => Ok("compare"),
             "rwa-spread" => Ok("rwa-spread"),
             "decision" => Ok("decision"),
@@ -376,6 +385,11 @@ impl<T: HttpTransport> HttpTransport for Restricted<T> {
             let value: Value = serde_json::from_str(body)?;
             let data = match op {
                 "compare" => compare(value)?,
+                "relative-change" => crate::strategy_ops::relative_change(value)?,
+                "context" => {
+                    ensure!(value.is_object(), "context must be an object");
+                    value
+                }
                 "rwa-spread" => crate::rwa::spread(&self.config, value)?,
                 "decision" => {
                     let d: Decision = serde_json::from_value(value)?;
@@ -388,9 +402,14 @@ impl<T: HttpTransport> HttpTransport for Restricted<T> {
                     state.decision = Some(d.clone());
                     serde_json::to_value(d)?
                 }
-                "quote" => {
-                    let i: Intent = serde_json::from_value(value)?;
-                    self.config.rules(&i)?;
+                "quote" | "observe-quote" => {
+                    if op == "quote" {
+                        let i: Intent = serde_json::from_value(value)?;
+                        self.config.rules(&i)?;
+                    } else {
+                        let o = serde_json::from_value(value)?;
+                        crate::strategy_ops::observation_config(&self.config, &o)?;
+                    }
                     options.timeout_ms = Some(10_000);
                     let response = self.backend.execute(r, options).await?;
                     ensure!(
@@ -415,7 +434,11 @@ impl<T: HttpTransport> HttpTransport for Restricted<T> {
 pub async fn run(c: &Config, s: &Snapshot) -> Result<RunReport> {
     run_with(c, s, Backend { config: c.clone() }).await
 }
-async fn run_with<T: HttpTransport>(c: &Config, s: &Snapshot, backend: T) -> Result<RunReport> {
+pub(crate) async fn run_with<T: HttpTransport>(
+    c: &Config,
+    s: &Snapshot,
+    backend: T,
+) -> Result<RunReport> {
     let (doc, _) = check(&s.yaml)?;
     let plan = compile_flow(&doc.flow, &doc.apis, &CompileEnvironment::default())
         .map_err(|e| anyhow!("{e:?}"))?;

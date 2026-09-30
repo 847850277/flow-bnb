@@ -2,12 +2,14 @@ pub mod agentic;
 pub mod agentic_handoff;
 mod auth;
 pub mod autonomy;
+pub mod cycle;
 pub mod mcp;
 pub mod policy;
 pub mod receipt;
 mod rwa;
 pub mod setup;
 pub mod strategy;
+mod strategy_ops;
 pub mod trade;
 
 pub use auth::{sign_request_at, BinanceWeb3Transport};

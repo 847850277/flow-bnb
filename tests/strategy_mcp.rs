@@ -116,6 +116,33 @@ fn calls(root: &Path) -> usize {
 }
 
 #[test]
+fn linked_cycle_can_be_generated_saved_and_replayed_without_wallet_configuration() {
+    let d = tempfile::tempdir().unwrap();
+    let mut m = Mcp::start(d.path());
+    let generated = m.tool(
+        "generate_bnb_flow",
+        json!({"template":"linked_stock_cycle"}),
+    );
+    let yaml = generated["canonical_yaml"].as_str().unwrap();
+    let validation = m.tool("validate_bnb_flow", json!({"yaml":yaml}));
+    assert_eq!(validation["valid"], true);
+    assert!(validation["strategy_validation_error"].is_null());
+    let saved = m.tool(
+        "save_bnb_flow",
+        json!({"path":"strategies/linked.http.yml","yaml":yaml}),
+    );
+    let replay = m.tool(
+        "replay_bnb_cycle",
+        json!({"path":"strategies/linked.http.yml","expected_sha256":saved["sha256"]}),
+    );
+    assert_eq!(replay["mode"], "simulation");
+    assert_eq!(replay["live_transactions"], false);
+    assert_eq!(replay["final_phase"], "completed");
+    assert_eq!(replay["simulated_orders"], 2);
+    assert!(!d.path().join(".flow-bnb").exists());
+}
+
+#[test]
 fn stock_spread_template_is_discoverable_and_can_be_reviewed_and_saved() {
     let d = fixture();
     let mut m = Mcp::start(d.path());

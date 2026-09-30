@@ -16,12 +16,14 @@ function fixture(t) {
   const key = platformKey();
   fs.mkdirSync(path.join(pkg, 'native', key), { recursive: true });
   fs.mkdirSync(path.join(pkg, 'flows'));
+  fs.mkdirSync(path.join(pkg, 'scripts'));
   fs.copyFileSync(path.join(here, 'launcher.mjs'), path.join(pkg, 'launcher.mjs'));
   fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ version: '0.1.0', type: 'module' }));
   const body = '#!/bin/sh\ncase "$1" in\nconnection-status) printf \'{"connected":true}\\n\' ;;\nmcp) cat ;;\n*) printf "%s\\n" "$@" > "$FLOW_BNB_AGENTIC_CONFIG.args" ;;\nesac\n';
   fs.writeFileSync(path.join(pkg, 'native', key, 'flow-bnb'), body);
   fs.writeFileSync(path.join(pkg, 'flows/stock.http.yml'), 'user-editable');
-  fs.writeFileSync(path.join(pkg, 'manifest.json'), JSON.stringify({ version: '0.1.0', binaries: { [key]: sha(body) }, flows: { 'stock.http.yml': sha('user-editable') } }));
+  fs.writeFileSync(path.join(pkg, 'scripts/run-cycle.sh'), '#!/bin/bash\nexit 0\n');
+  fs.writeFileSync(path.join(pkg, 'manifest.json'), JSON.stringify({ version: '0.1.0', binaries: { [key]: sha(body) }, flows: { 'stock.http.yml': sha('user-editable') }, scripts: { 'run-cycle.sh': sha('#!/bin/bash\nexit 0\n') } }));
   return { pkg, home, key, root };
 }
 test('clean install is private, persistent, and preserves user strategy and wallet locks', t => {
@@ -39,6 +41,7 @@ test('clean install is private, persistent, and preserves user strategy and wall
   assert.equal(fs.readFileSync(lock, 'utf8'), 'pending');
   fs.rmSync(f.pkg, { recursive: true });
   assert.ok(fs.existsSync(installed.binary), 'npm cache eviction must not remove stable Flow binary');
+  assert.equal(fs.readFileSync(path.join(path.dirname(installed.binary), 'run-cycle.sh'), 'utf8'), '#!/bin/bash\nexit 0\n');
 });
 test('rejects corrupted binaries, replaced installed binary, and unsupported platforms', t => {
   const f = fixture(t); const installed = prepare(f.pkg, f.home, f.key);
@@ -55,6 +58,11 @@ test('read-only status does not create installation state; symlinks are rejected
   assert.ok(!fs.existsSync(f.home));
   fs.symlinkSync(f.root, f.home);
   assert.throws(() => prepare(f.pkg, f.home, f.key), /私有目录/);
+});
+test('rejects a modified installed cycle runner', t => {
+  const f = fixture(t); const installed = prepare(f.pkg, f.home, f.key);
+  fs.writeFileSync(path.join(path.dirname(installed.binary), 'run-cycle.sh'), 'modified');
+  assert.throws(() => prepare(f.pkg, f.home, f.key), /校验失败/);
 });
 test('npm-style symlink entry forwards MCP stdin/stdout and exit code, never logs on stdout', t => {
   const f = fixture(t); prepare(f.pkg, f.home, f.key);
