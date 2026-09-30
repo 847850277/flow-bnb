@@ -32,6 +32,11 @@ poll `get_bnb_connection` every 3–5 seconds. Show the official URL and pairing
 Keep the MCP client open while pairing. Login never creates a trading mandate.
 The MCP handshake does not wait for wallet installation or authentication.
 
+Since v0.2.0, explicit native execution requests start trading directly without a
+Flow terminal confirmation or an `agentic-operator` process. Strategy mandates
+are optional budgets. Quote and strategy-preview tools remain read-only. Keep
+the MCP client running during execution so it can return the order and settlement.
+
 WorkBuddy 5.0+ imports `flow-bnb-workbuddy.zip` using its documented stdio
 `preAuth: "cli"` lifecycle (init/auth/status/unAuth, managed Node 22,
 `authWaitForExit: true`). Claude Desktop on macOS imports `flow-bnb.mcpb` using its
@@ -80,6 +85,14 @@ installer. Node used by managed `baw` is also bound by its absolute launcher pat
 Wallet state, policies, order locks and user-edited flows survive reinstall/logout.
 Source-checkout settings are not silently migrated; reconnect must match the saved
 wallet. Disconnect does not recall already submitted orders.
+
+Update a connector by importing the new release bundle and reconnecting MCP, or
+rerun the new universal installer for a registered client. When connected,
+`get_bnb_connection` reports `execution_mode: "direct"` and
+`confirmation_required: false` in v0.2.0. Historical `agentic-*.lock` and
+`halted.json` files are preserved but no longer block execution. Startup never
+drains old queued requests. Request deduplication and record-write synchronization
+remain in place.
 
 Registration preserves unrelated settings and JSONC/TOML comments. Existing files
 are backed up with private permissions before atomic replacement. Repeated setup
@@ -137,8 +150,10 @@ contents change (installed version contents are immutable). Publish all assets:
 
 Public links use a fixed GitHub release version. There is no assumed npm registry
 publication. Public repository/release publication and marketplace submission are
-separate actions. Current acceptance is automated + local packaged MCP; actual
-client UI acceptance, other host acceptance and public download remain pending.
+separate actions. [v0.2.0](https://github.com/847850277/flow-bnb/releases/tag/v0.2.0)
+is published with all six assets. Four-platform builds, packaged MCP acceptance
+and public download/checksum verification passed. These automated checks do not
+establish UI acceptance in every supported client or a live-trade test of v0.2.0.
 
 ## Primary configuration references
 
