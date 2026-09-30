@@ -8,8 +8,7 @@
       "0x55d398326f99059fF775485246999027B3197955",
       "0xa9ee28c80f960b889dfbd1902055218cba016f75"
     ],
-    "require_successful_simulation": true,
-    "require_operator_confirmation": true
+    "require_successful_simulation": true
   },
   "allowed_routers": [],
   "allowed_spenders": [],

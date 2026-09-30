@@ -231,7 +231,7 @@ fn completes_without_stdin_confirmation_and_retries_never_resubmit() {
     assert_eq!(f.swaps(), 1);
 }
 #[test]
-fn unknown_and_discrepancy_halt_without_refunding_or_replaying() {
+fn unknown_and_discrepancy_preserve_user_budget_without_refunding_or_replaying() {
     for mode in ["unknown", "discrepancy"] {
         let f = Fixture::new(mode);
         f.authorize("1");
@@ -242,7 +242,7 @@ fn unknown_and_discrepancy_halt_without_refunding_or_replaying() {
             "--request-id",
             "once",
         ]);
-        assert!(!o.status.success());
+        assert_eq!(o.status.success(), mode == "discrepancy");
         let v: Value = serde_json::from_slice(&o.stdout).unwrap();
         assert_eq!(
             v["state"],
@@ -305,114 +305,160 @@ fn non_triggered_and_revoked_mandates_never_call_swap() {
 #[test]
 fn mcp_runs_in_background_and_returns_pure_json_without_a_terminal() {
     use std::sync::mpsc;
-    let f = Fixture::new("complete");
-    f.authorize("1");
-    let mut child = f
-        .command(&["mcp"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    struct Kill(std::process::Child);
-    impl Drop for Kill {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+    for mode in ["authorized", "direct", "strategy"] {
+        let f = Fixture::new("complete");
+        if mode == "authorized" {
+            f.authorize("1");
         }
-    }
-    let mut input = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let mut child = Kill(child);
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let v: Value =
-                serde_json::from_str(&line.unwrap()).expect("MCP stdout must contain only JSON");
-            if sender.send(v).is_err() {
-                break;
+        let mut child = f
+            .command(&["mcp"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
             }
         }
-    });
-    let mut sequence = 0u64;
-    {
-        let mut call = |method: &str, params: Value| {
+        let mut input = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut child = Kill(child);
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let v: Value = serde_json::from_str(&line.unwrap())
+                    .expect("MCP stdout must contain only JSON");
+                if sender.send(v).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut sequence = 0u64;
+        {
+            let mut call = |method: &str, params: Value| {
+                sequence += 1;
+                let id = sequence;
+                writeln!(
+                    input,
+                    "{}",
+                    json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+                )
+                .unwrap();
+                input.flush().unwrap();
+                loop {
+                    let v = receiver
+                        .recv_timeout(Duration::from_secs(15))
+                        .expect("MCP timeout");
+                    if v["id"] == id {
+                        assert!(v.get("error").is_none(), "{v}");
+                        return v["result"].clone();
+                    }
+                }
+            };
+            call(
+                "initialize",
+                json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"auto-test","version":"1"}}),
+            );
+            // The rmcp server accepts calls after the initialize response; explicit notification below.
+        }
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .unwrap();
+        input.flush().unwrap();
+        let mut tool = |name: &str, args: Value| {
             sequence += 1;
             let id = sequence;
-            writeln!(
-                input,
-                "{}",
-                json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
-            )
-            .unwrap();
+            writeln!(input,"{}",json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap();
             input.flush().unwrap();
             loop {
                 let v = receiver
                     .recv_timeout(Duration::from_secs(15))
-                    .expect("MCP timeout");
+                    .expect("MCP tool timeout");
                 if v["id"] == id {
                     assert!(v.get("error").is_none(), "{v}");
                     return v["result"].clone();
                 }
             }
         };
-        call(
-            "initialize",
-            json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"auto-test","version":"1"}}),
+        let inspected = tool("get_bnb_strategy_authorization", json!({}));
+        assert_ne!(inspected["isError"], true, "{inspected}");
+        assert_eq!(
+            inspected["structuredContent"]["authorizations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            usize::from(mode == "authorized")
         );
-        // The rmcp server accepts calls after the initialize response; explicit notification below.
-    }
-    writeln!(
-        input,
-        "{}",
-        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
-    )
-    .unwrap();
-    input.flush().unwrap();
-    let mut tool = |name: &str, args: Value| {
-        sequence += 1;
-        let id = sequence;
-        writeln!(input,"{}",json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap();
-        input.flush().unwrap();
-        loop {
-            let v = receiver
-                .recv_timeout(Duration::from_secs(15))
-                .expect("MCP tool timeout");
-            if v["id"] == id {
-                assert!(v.get("error").is_none(), "{v}");
-                return v["result"].clone();
+        // Historical global barriers do not stop either execution path and are not deleted.
+        let legacy = f
+            .dir
+            .path()
+            .join(format!(".flow-bnb/state/agentic-{WALLET}.lock"));
+        fs::write(&legacy, "historical-order-report").unwrap();
+        let intent = json!({"from_token":AAPL,"to_token":USDT,"amount":"0.01","slippage_bps":50});
+        let (execute, query, args) = match mode {
+            "authorized" => (
+                "execute_bnb_authorized_strategy",
+                "get_bnb_authorized_execution",
+                json!({"authorization_id":"apple","request_id":"one"}),
+            ),
+            "direct" => {
+                let preview = tool("prepare_agentic_trade", intent.clone());
+                assert_eq!(preview["structuredContent"]["state"], "ready", "{preview}");
+                assert_eq!(f.swaps(), 0);
+                (
+                    "request_agentic_execution",
+                    "get_agentic_execution",
+                    json!({"request_id":"one","intent":intent}),
+                )
             }
+            _ => {
+                let source = tool("read_bnb_flow", json!({"path":"strategy.http.yml"}));
+                assert_ne!(source["isError"], true, "{source}");
+                (
+                    "request_bnb_strategy_execution",
+                    "get_agentic_execution",
+                    json!({"path":"strategy.http.yml","expected_sha256":source["structuredContent"]["sha256"],"request_id":"one","inputs":{"intent":intent,"min_receive":"1"}}),
+                )
+            }
+        };
+        let started = tool(execute, args.clone());
+        assert_ne!(started["isError"], true, "{started}");
+        let query_args = if mode == "authorized" {
+            args.clone()
+        } else {
+            assert_eq!(started["structuredContent"]["state"], "executing");
+            json!({"intent_id":started["structuredContent"]["intent_id"]})
+        };
+        let concurrent_retry = tool(execute, args.clone());
+        assert_ne!(concurrent_retry["isError"], true, "{concurrent_retry}");
+        let until = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let response = tool(query, query_args.clone());
+            assert_ne!(response["isError"], true, "{response}");
+            if response["structuredContent"]["state"] == "completed" {
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "{response}");
+            thread::sleep(Duration::from_millis(30));
         }
-    };
-    let inspected = tool("get_bnb_strategy_authorization", json!({}));
-    assert_ne!(inspected["isError"], true, "{inspected}");
-    assert_eq!(
-        inspected["structuredContent"]["authorizations"][0]["authorization"]["authorization_id"],
-        "apple"
-    );
-    let rejected = tool(
-        "execute_bnb_authorized_strategy",
-        json!({"authorization_id":"missing","request_id":"one"}),
-    );
-    assert_eq!(rejected["isError"], true);
-    let args = json!({"authorization_id":"apple","request_id":"one"});
-    let started = tool("execute_bnb_authorized_strategy", args.clone());
-    assert_ne!(started["isError"], true, "{started}");
-    let until = std::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        let response = tool("get_bnb_authorized_execution", args.clone());
-        assert_ne!(response["isError"], true, "{response}");
-        if response["structuredContent"]["state"] == "completed" {
-            break;
-        }
-        assert!(std::time::Instant::now() < until, "{response}");
-        thread::sleep(Duration::from_millis(30));
+        assert_eq!(f.swaps(), 1);
+        let retry = tool(execute, args);
+        assert_eq!(retry["structuredContent"]["state"], "completed");
+        assert_eq!(f.swaps(), 1);
+        assert_eq!(
+            fs::read_to_string(&legacy).unwrap(),
+            "historical-order-report"
+        );
+        child.0.kill().unwrap();
     }
-    assert_eq!(f.swaps(), 1);
-    let retry = tool("execute_bnb_authorized_strategy", args);
-    assert_eq!(retry["structuredContent"]["state"], "completed");
-    assert_eq!(f.swaps(), 1);
-    child.0.kill().unwrap();
 }
 
 #[test]
@@ -435,4 +481,157 @@ fn condition_fading_before_dispatch_is_not_a_submission_or_a_permanent_halt() {
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(v["reserved_orders"], 0);
     assert_eq!(v["eligible"], true);
+}
+
+#[test]
+fn native_cli_executes_without_tty_and_never_reuses_a_report() {
+    let f = Fixture::new("complete");
+    let intent = json!({"from_token":AAPL,"to_token":USDT,"amount":"0.01","slippage_bps":50});
+    fs::write(f.dir.path().join("intent.json"), intent.to_string()).unwrap();
+    let preview = f.run(&[
+        "agentic-trade",
+        "--request",
+        "intent.json",
+        "--report",
+        "preview.json",
+    ]);
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    assert_eq!(f.swaps(), 0);
+    let args = [
+        "agentic-trade",
+        "--request",
+        "intent.json",
+        "--report",
+        "execution.json",
+        "--execute",
+    ];
+    let result = f.run(&args);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()["state"],
+        "completed"
+    );
+    assert_eq!(f.swaps(), 1);
+    assert!(!f.run(&args).status.success());
+    assert_eq!(f.swaps(), 1);
+    assert!(fs::read_dir(f.dir.path().join(".flow-bnb/state"))
+        .unwrap()
+        .all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".lock")));
+}
+
+#[test]
+fn exceptional_order_results_do_not_lock_independent_requests_or_replay_old_ones() {
+    for mode in ["unknown", "discrepancy"] {
+        let f = Fixture::new(mode);
+        let input = format!(
+            "intent={}",
+            json!({"from_token":AAPL,"to_token":USDT,"amount":"0.01","slippage_bps":50})
+        );
+        let expected = if mode == "unknown" {
+            "submission_outcome_unknown"
+        } else {
+            "settled_with_discrepancy"
+        };
+        for (id, count) in [("one", 1), ("one", 1), ("independent-order", 2)] {
+            let result = f.run(&[
+                "strategy-run",
+                "strategy.http.yml",
+                "--input",
+                &input,
+                "--input",
+                "min_receive=\"1\"",
+                "--execute",
+                id,
+            ]);
+            let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+            assert_eq!(
+                report["state"],
+                expected,
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(f.swaps(), count);
+        }
+    }
+}
+
+#[test]
+fn direct_strategy_rechecks_conditions_and_startup_never_drains_old_requests() {
+    let f = Fixture::new("complete");
+    let input = format!(
+        "intent={}",
+        json!({"from_token":AAPL,"to_token":USDT,"amount":"0.01","slippage_bps":50})
+    );
+    fs::write(f.dir.path().join("condition_changes"), "yes").unwrap();
+    fs::write(f.dir.path().join("quotes"), "1").unwrap();
+    let result = f.run(&[
+        "strategy-run",
+        "strategy.http.yml",
+        "--input",
+        &input,
+        "--input",
+        "min_receive=\"1\"",
+        "--execute",
+        "changed",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()["state"],
+        "not_triggered"
+    );
+    assert_eq!(f.swaps(), 0);
+    fs::remove_file(f.dir.path().join("condition_changes")).unwrap();
+    let queued = f.run(&[
+        "strategy-run",
+        "strategy.http.yml",
+        "--input",
+        &input,
+        "--input",
+        "min_receive=\"1\"",
+        "--enqueue",
+        "old",
+    ]);
+    assert!(queued.status.success());
+    let queued: Value = serde_json::from_slice(&queued.stdout).unwrap();
+    assert_eq!(queued["state"], "queued");
+    let c = flow_bnb::agentic::Config::read(&f.dir.path().join(".flow-bnb/agentic.json")).unwrap();
+    let inbox = flow_bnb::agentic_handoff::Inbox::open(c).unwrap();
+    assert_eq!(
+        inbox.status(queued["intent_id"].as_str().unwrap()).unwrap()["state"],
+        "queued"
+    );
+    // MCP can initialize and exit with a saved request present; startup does not execute it.
+    let mut child = f
+        .command(&["mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(input, "{}", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"startup-test","version":"1"}}})).unwrap();
+    input.flush().unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert!(serde_json::from_str::<Value>(&line)
+        .unwrap()
+        .get("result")
+        .is_some());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(f.swaps(), 0);
 }

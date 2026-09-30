@@ -55,7 +55,7 @@ cargo run --locked -- strategy-run flows/stock_spread_strategy.http.yml \
 
 对应 MCP 顺序为 `generate_bnb_flow` → `validate_bnb_flow` → `save_bnb_flow` → `run_bnb_strategy`。`list_bnb_capabilities` 中包含新模板和参数说明。
 
-实际行情未触发也能展示完整结果，无需为演示临时放宽真实交易权限。已明确请求执行时，可使用现有 `request_bnb_strategy_execution` 入队；操作员确认后重新获取价格并求值，条件消失或数据失效会阻止提交。预授权流程也冻结相同 YAML 和输入，并沿用相同的执行前复查。实际交易继续经过原生钱包的账户、余额、审计、报价及滑点检查。
+实际行情未触发也能展示完整结果，无需为演示临时放宽真实交易权限。已明确请求执行时，可使用 `request_bnb_strategy_execution` 直接执行；提交前重新获取价格并求值，条件消失或数据失效会阻止提交。预授权流程也冻结相同 YAML 和输入，并沿用相同的执行前复查。实际交易继续经过原生钱包的账户、余额、审计、报价及滑点检查。
 
 ## 离线验证范围
 

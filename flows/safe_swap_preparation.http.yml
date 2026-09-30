@@ -148,7 +148,7 @@ flow:
           path: $.data.balanceChanges
         - name: allowance_changes
           path: $.data.allowanceChanges
-  # 最终结果：返回报价、最低接收数量、模拟状态及预计变化，供后续策略检查和人工确认使用。
+  # 最终结果：返回报价、最低接收数量、模拟状态及预计变化，供后续策略检查和执行使用。
   outputs:
     - name: chain_id
       value: { input: chain_id }

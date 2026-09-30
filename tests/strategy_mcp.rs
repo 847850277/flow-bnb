@@ -144,7 +144,7 @@ fn stock_spread_template_is_discoverable_and_can_be_reviewed_and_saved() {
 }
 
 #[test]
-fn authored_yaml_round_trip_preview_queue_retry_cancel_and_frozen_snapshot() {
+fn authored_yaml_round_trip_preview_execution_retry_and_frozen_snapshot() {
     let d = fixture();
     let mut m = Mcp::start(d.path());
     let tools = m.call("tools/list", json!({}));
@@ -190,7 +190,21 @@ fn authored_yaml_round_trip_preview_queue_retry_cancel_and_frozen_snapshot() {
     assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
     fs::write(d.path().join("quote"), "0.021").unwrap();
     let queued = m.tool("request_bnb_strategy_execution", queue.clone());
-    assert_eq!(queued["state"], "awaiting_operator");
+    assert_eq!(queued["state"], "executing");
+    // This quote-only wallet cannot execute. The worker must finish as blocked,
+    // not wait for an operator. Wait before checking that retries do no work.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let status = m.tool(
+            "get_agentic_execution",
+            json!({"intent_id":queued["intent_id"]}),
+        );
+        if status["state"] == "blocked" {
+            break;
+        }
+        assert!(std::time::Instant::now() < until, "{status}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     let id = queued["intent_id"].clone();
     let before = calls(d.path());
     fs::write(d.path().join("quote"), "0.001").unwrap();
@@ -204,11 +218,10 @@ fn authored_yaml_round_trip_preview_queue_retry_cancel_and_frozen_snapshot() {
     let mut changed = queue.clone();
     changed["inputs"] = json!({"min_receive":"0.01"});
     m.fails("request_bnb_strategy_execution", changed);
-    let cancelled = m.tool("cancel_agentic_execution", json!({"intent_id":id}));
-    assert_eq!(cancelled["state"], "cancelled");
+    m.fails("cancel_agentic_execution", json!({"intent_id":id}));
     assert_eq!(
         m.tool("request_bnb_strategy_execution", queue.clone())["state"],
-        "cancelled"
+        "blocked"
     );
     let mut modified = source.clone();
     modified.push_str("\n# user edit\n");

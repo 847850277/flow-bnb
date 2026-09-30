@@ -509,7 +509,7 @@ pub async fn setup_for_root(
         })();
         let _ = fs::remove_dir_all(draft);
         publish?;
-        eprintln!("  初始限额：单笔最多 6 USDT / 0.01 AAPLon，滑点最多 0.5%；每笔仍需确认。");
+        eprintln!("  初始限额：单笔最多 6 USDT / 0.01 AAPLon，滑点最多 0.5%；执行工具会直接下单。");
     }
     crate::agentic::Config::read(&config)?;
     eprintln!("[3/3] 生成 MCP 客户端配置…");
@@ -527,13 +527,7 @@ pub async fn setup_for_root(
     )?;
     fs::rename(stage.join("mcp.json"), &mcp_path)?;
     fs::remove_dir(stage)?;
-    let cli = env::current_exe()?;
-    let invocation = if root.join("Cargo.toml").is_file() && cli.starts_with(root.join("target")) {
-        "cargo run --locked --".to_string()
-    } else {
-        shell_quote(&cli.to_string_lossy())
-    };
-    eprintln!("\n已就绪 · BSC 钱包 {address}\n钱包配置：{}\nMCP 配置：{}\n连接器用户可返回对话开始查询和创建策略。手动配置客户端时使用上述 MCP 配置。\n仅逐笔人工确认模式需要操作员终端：\n{invocation} agentic-operator --config {} --watch", config.display(), mcp_path.display(), shell_quote(&config.to_string_lossy()));
+    eprintln!("\n已就绪 · BSC 钱包 {address}\n钱包配置：{}\nMCP 配置：{}\n返回对话即可询价或请求交易。执行工具直接下单，无需另开操作员终端。手动配置客户端时使用上述 MCP 配置。", config.display(), mcp_path.display());
     Ok(())
 }
 
@@ -621,23 +615,10 @@ pub async fn doctor(config: &Path) -> Result<()> {
         a.eq_ignore_ascii_case(&c.wallet_address),
         "当前钱包与配置不符；请切回原钱包"
     );
-    let locks = fs::read_dir(&c.state_dir)?
-        .filter_map(Result::ok)
-        .filter(|e| {
-            let n = e.file_name();
-            let n = n.to_string_lossy();
-            n.starts_with("agentic-") && n.ends_with(".lock")
-        })
-        .count();
     eprintln!(
         "✓ baw {BAW_VERSION} · 已连接 · BSC {a}\n✓ 配置有效；单笔滑点上限 {} bps",
         c.max_slippage_bps
     );
-    if locks > 0 {
-        eprintln!(
-            "注意：存在 {locks} 个交易提交锁。请先核对已有订单报告；setup 不会清除锁或重试交易。"
-        );
-    }
     eprintln!("此检查未下单；余额、报价和代币审计在交易准备时检查。");
     Ok(())
 }

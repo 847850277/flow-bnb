@@ -245,10 +245,6 @@ impl Store {
             "authorization revoked"
         );
         ensure!(
-            !self.dir.join("halted.json").try_exists()?,
-            "authorization halted; inspect existing execution reports"
-        );
-        ensure!(
             Utc::now() < self.mandate.expires_at,
             "authorization expired"
         );
@@ -322,27 +318,6 @@ impl Store {
                 "authorization cooldown has not elapsed"
             );
         }
-        ensure!(
-            !self
-                .config
-                .state_dir
-                .join(format!(
-                    "agentic-{}.lock",
-                    self.config.wallet_address.to_lowercase()
-                ))
-                .try_exists()?,
-            "wallet has unresolved submission; inspect previous order first"
-        );
-        Ok(())
-    }
-    fn halt(&self, message: &str) -> Result<()> {
-        if !self.dir.join("halted.json").try_exists()? {
-            write(
-                &self.dir.join("halted.json"),
-                &json!({"at":Utc::now(),"message":message}),
-                false,
-            )?;
-        }
         Ok(())
     }
 }
@@ -383,13 +358,7 @@ impl Permit {
     fn finish(&mut self, state: &str, message: Option<String>) -> Result<()> {
         self.attempt.state = state.into();
         self.attempt.message = message;
-        self.save()?;
-        if !matches!(state, "completed" | "not_triggered") {
-            self.store.halt(
-                "Execution stopped or needs review; reservations are not refunded automatically",
-            )?;
-        }
-        Ok(())
+        self.save()
     }
     async fn execute(&mut self) -> Result<()> {
         self.store.check_active()?;
@@ -428,13 +397,7 @@ fn claim(c: &Config, id: &str, request_id: &str) -> Result<Option<Permit>> {
     store.budget()?;
     let attempts = store.attempts()?;
     ensure!(attempts.len() < 1024, "authorization evaluation log full");
-    // A terminated task is not a retry opportunity, even if it died before reserving.
-    ensure!(
-        !attempts
-            .iter()
-            .any(|a| !matches!(a.state.as_str(), "completed" | "not_triggered")),
-        "previous execution was interrupted; inspect it before further automatic execution"
-    );
+    // Prior requests remain deduplicated and reserved; they do not lock new orders.
     let now = Utc::now();
     let attempt = Attempt {
         request_id: request_id.into(),
@@ -465,7 +428,7 @@ pub fn start(c: Config, id: String, request_id: String) -> Result<Value> {
     }
     execution(&c, &id, &request_id)
 }
-/// Foreground CLI entry; no TTY and no CONFIRM are needed for an existing mandate.
+/// Foreground CLI execution with optional strategy budgets.
 pub async fn execute(c: Config, id: String, request_id: String) -> Result<Value> {
     if let Some(mut permit) = claim(&c, &id, &request_id)? {
         if let Err(e) = permit.execute().await {
@@ -479,20 +442,11 @@ pub fn status(c: &Config, id: &str) -> Result<Value> {
     let (orders, total, last) = store.usage()?;
     let (sell, _) = c.rules(&store.mandate.intent)?;
     let busy = store.lock().is_err();
-    let interrupted = !busy
-        && store
-            .attempts()?
-            .iter()
-            .any(|a| !matches!(a.state.as_str(), "completed" | "not_triggered"));
-    let blocked = store.budget().err().map(|e| e.to_string()).or_else(|| {
-        if interrupted {
-            Some("previous execution needs attention".into())
-        } else if busy {
-            Some("execution is currently active".into())
-        } else {
-            None
-        }
-    });
+    let blocked = store
+        .budget()
+        .err()
+        .map(|e| e.to_string())
+        .or_else(|| busy.then(|| "execution is currently active".into()));
     Ok(
         json!({"authorization":store.mandate,"reserved_orders":orders,"reserved_sell_amount":agentic::decimal(&total,sell.decimals),
         "last_reserved_at":last,"eligible":blocked.is_none(),"blocker":blocked,"confirmation_required":false}),
@@ -547,18 +501,11 @@ pub async fn refresh(c: Config, id: String, request_id: String) -> Result<Value>
     execution(&c, &id, &request_id)?;
     let path = store.path(&request_id, "attempt.json")?;
     let mut attempt: Attempt = read(&path)?;
-    let was_stopped = attempt.state != "completed";
     let report = agentic::track(c.clone(), &store.path(&request_id, "report.json")?).await?;
     attempt.state = report.state;
     attempt.message = report.error;
     attempt.updated_at = Utc::now();
     write(&path, &attempt, true)?;
-    if was_stopped || attempt.state != "completed" {
-        store.halt(
-            "Interrupted or exceptional execution was refreshed; operator review still required",
-        )?;
-    }
-    // Keep the halt sticky even when read-only reconciliation succeeds.
     execution(&c, &id, &request_id)
 }
 
@@ -668,7 +615,7 @@ mod tests {
         assert!(p.attempt.reserved_amount.is_none());
     }
     #[test]
-    fn exclusive_claims_and_interruption_never_become_retry_permissions() {
+    fn concurrent_budget_access_serializes_but_interruption_does_not_lock_future_orders() {
         let (_d, c, _s, _i) = fixture(3, "18", 0);
         let p = claim(&c, "test", "one").unwrap().unwrap();
         assert!(claim(&c, "test", "one").unwrap().is_none());
@@ -678,17 +625,19 @@ mod tests {
             execution(&c, "test", "one").unwrap()["state"],
             "interrupted_outcome_unknown"
         );
-        assert_eq!(status(&c, "test").unwrap()["eligible"], false);
-        assert!(claim(&c, "test", "two").is_err());
+        assert_eq!(status(&c, "test").unwrap()["eligible"], true);
+        assert!(claim(&c, "test", "one").unwrap().is_none());
+        assert!(claim(&c, "test", "two").unwrap().is_some());
     }
     #[test]
-    fn unknown_submission_keeps_budget_and_cannot_be_reset_by_new_id() {
+    fn unknown_submission_keeps_budget_without_locking_independent_orders() {
         let (_d, c, s, i) = fixture(3, "18", 0);
         let mut p = claim(&c, "test", "one").unwrap().unwrap();
         p.reserve(&c, &i, &s.binding().unwrap()).unwrap();
         drop(p);
         assert_eq!(status(&c, "test").unwrap()["reserved_sell_amount"], "6");
-        assert!(claim(&c, "test", "two").is_err());
+        assert!(claim(&c, "test", "one").unwrap().is_none());
+        assert!(claim(&c, "test", "two").unwrap().is_some());
         assert!(create(
             c.clone(),
             "test".into(),

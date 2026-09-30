@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{Seek, SeekFrom, Write},
+    io::{Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -475,7 +475,7 @@ fn check_audit(a: &Value) -> Result<()> {
     }
     Ok(())
 }
-// Only explicit, well-formed availability flags permit the manual-review path.
+// Only explicit, well-formed availability flags permit an unavailable-audit warning.
 // Transport/API errors and malformed responses still fail preparation.
 fn summarize_audit(mut a: Value) -> Result<Value> {
     let has_result = a["hasResult"]
@@ -489,9 +489,9 @@ fn summarize_audit(mut a: Value) -> Result<Value> {
         // or report that an unavailable audit found the token safe/unsafe.
         return Ok(json!({
             "status":"unavailable", "hasResult":has_result, "isSupported":supported,
-            "confirmation_required":true,
+            "confirmation_required":false,
             "message":"Security audit data is unavailable for this token on BSC. This does not establish whether the token is safe or unsafe.",
-            "next_action":"Manual execution can continue only after the operator reviews this exact order and types CONFIRM WITHOUT AUDIT in the operator terminal. Automatic execution cannot acknowledge this warning."
+            "severity":"warning"
         }));
     }
     a["status"] = json!("available");
@@ -520,7 +520,7 @@ pub struct Report {
     pub quote: Value,
     pub wallet_settings: Value,
     pub token_audit: Value,
-    /// Evidence for this manual order only; never accepted as an execution input.
+    /// Historical evidence from older reports; new executions do not create acknowledgements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_acknowledgement: Option<Value>,
     pub order_id: Option<String>,
@@ -632,10 +632,6 @@ where
     }
     .await;
     match result {
-        Ok(()) if r.token_audit["status"] == "unavailable" => {
-            r.state = "audit_confirmation_required".into();
-            r.error = Some("token audit unavailable; explicit confirmation of this order is required in the operator terminal".into());
-        }
         Ok(()) => r.state = "ready".into(),
         Err(e) => {
             r.state = "blocked".into();
@@ -687,120 +683,7 @@ fn save(file: &mut fs::File, r: &Report) -> Result<()> {
     file.sync_all()?;
     Ok(())
 }
-fn confirmation_phrase(r: &Report) -> Option<&'static str> {
-    match r.state.as_str() {
-        "ready" => Some("CONFIRM"),
-        "audit_confirmation_required" => Some("CONFIRM WITHOUT AUDIT"),
-        _ => None,
-    }
-}
-fn terminal_confirmation(r: &Report) -> Result<String> {
-    let phrase = confirmation_phrase(r).context("preparation cannot be confirmed")?;
-    let mut tty = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .context("execution requires an operator terminal")?;
-    writeln!(tty, "{}", serde_json::to_string_pretty(r)?)?;
-    writeln!(tty, "Native Agentic Wallet execution: quoted output may change. Local limits cover token amounts and slippage, not USD notional, price impact or independent simulation. Wallet risk checks still apply.")?;
-    if r.state == "audit_confirmation_required" {
-        writeln!(tty, "代币审计数据不可用，无法据此判断该代币安全或危险。继续表示你知晓本次交易缺少这项检查；此确认仅适用于上面这一笔交易，不授权自动策略或后续交易。")?;
-        writeln!(tty, "Token security audit data is unavailable. Confirming accepts this missing check for the exact order shown above only; it does not authorize future orders or automatic strategies.")?;
-    }
-    writeln!(
-        tty,
-        "Type {phrase} to submit this one order after fresh checks (anything else cancels):"
-    )?;
-    tty.flush()?;
-    let mut answer = String::new();
-    std::io::BufRead::read_line(&mut std::io::BufReader::new(tty), &mut answer)?;
-    Ok(answer)
-}
-// Neither a CLI flag nor an MCP argument can supply this acknowledgement. It is
-// produced in the current operator run, bound to the exact order, and never read
-// back from a saved report to authorize a later submission.
-async fn review_preparation<F, Fut, C>(
-    c: &Config,
-    mut r: Report,
-    automatic: bool,
-    mut refresh: F,
-    mut confirm: C,
-) -> Result<Report>
-where
-    F: FnMut(Intent) -> Fut,
-    Fut: std::future::Future<Output = Result<Report>>,
-    C: FnMut(&Report) -> Result<String>,
-{
-    if automatic {
-        // A mandate covers the trade intent, never acknowledgement of a missing
-        // security check. run_inner will only submit state=ready.
-        return Ok(r);
-    }
-    // A previously available audit may disappear during normal confirmation.
-    // In that case show the new warning and obtain the specific acknowledgement.
-    for _ in 0..2 {
-        let Some(phrase) = confirmation_phrase(&r) else {
-            return Ok(r);
-        };
-        if confirm(&r)?.trim() != phrase {
-            r.state = "cancelled".into();
-            r.error = None;
-            return Ok(r);
-        }
-        let acknowledgement = (r.state == "audit_confirmation_required").then(|| {
-            json!({
-                "source":"operator_terminal", "scope":"this_order_only",
-                "acknowledged_at":chrono::Utc::now().to_rfc3339(),
-                "wallet_address":r.wallet_address, "config_sha256":r.config_sha256,
-                "intent":r.intent, "audit_snapshot":r.token_audit
-            })
-        });
-        let mut fresh = refresh(r.intent.clone()).await?;
-        ensure!(
-            fresh.wallet_address == r.wallet_address
-                && fresh.config_sha256 == r.config_sha256
-                && serde_json::to_value(&fresh.intent)? == serde_json::to_value(&r.intent)?,
-            "preparation changed the confirmed wallet, configuration or intent"
-        );
-        fresh.audit_acknowledgement = acknowledgement;
-        // Known risk, unavailable balances, malformed responses etc. cannot be
-        // waived by accepting the absence of audit data.
-        if confirmation_phrase(&fresh).is_none() {
-            return Ok(fresh);
-        }
-        let (_, buy) = c.rules(&r.intent)?;
-        let old = units(
-            r.quote["toCoinAmount"].as_str().context("missing quote")?,
-            buy.decimals,
-        )?;
-        let new = units(
-            fresh.quote["toCoinAmount"]
-                .as_str()
-                .context("missing fresh quote")?,
-            buy.decimals,
-        )?;
-        if new < old {
-            fresh.state = "quote_changed".into();
-            fresh.error =
-                Some("output decreased while confirming; review a new preparation".into());
-            return Ok(fresh);
-        }
-        if fresh.state == "ready" {
-            return Ok(fresh);
-        }
-        if fresh.audit_acknowledgement.is_some() {
-            // Preserve status=unavailable and absent risk fields in the report;
-            // readiness means the user accepted the missing check, not audit pass.
-            fresh.token_audit["confirmation_required"] = json!(false);
-            fresh.state = "ready".into();
-            fresh.error = None;
-            return Ok(fresh);
-        }
-        r = fresh;
-    }
-    Ok(r)
-}
-/// Operator-owned CLI entry point. No model-facing tool calls this execute path.
+/// Prepare read-only, or submit directly when execution is explicitly requested.
 pub async fn run(c: Config, i: Intent, path: &Path, execute: bool) -> Result<Report> {
     run_with_strategy(c, i, path, execute, None).await
 }
@@ -843,16 +726,6 @@ async fn run_inner(
     if !execute {
         return Ok(r);
     }
-    r = review_preparation(
-        &c,
-        r,
-        permit.is_some(),
-        |intent| prepare(&c, intent),
-        terminal_confirmation,
-    )
-    .await?;
-    save(&mut file, &r)?;
-    // Automatic execution never enters the operator confirmation path above.
     if r.state != "ready" {
         return Ok(r);
     }
@@ -862,7 +735,7 @@ async fn run_inner(
             let evaluation = crate::strategy::run(&c, &snapshot).await?;
             r.stages
                 .push(json!({"strategy_sha256":binding.snapshot_sha256,"recheck":evaluation}));
-            if permit.is_some() && evaluation.success {
+            if evaluation.success {
                 if let Some(d) = &evaluation.decision {
                     if !d.triggered
                         && serde_json::to_value(&d.intent)? == serde_json::to_value(&r.intent)?
@@ -900,8 +773,7 @@ async fn run_inner(
                 .context("authorized execution requires a frozen strategy")?,
         )?;
     }
-    // Persistent per-wallet barrier survives crash/timeout even with a new report path.
-    reserve_submission(&c, path)?;
+    // Persist uncertainty before submitting; this report path can never submit twice.
     r.state = "submission_outcome_unknown".into();
     save(&mut file, &r)?;
     match call(&c, json!({"op":"swap","intent":r.intent})).await {
@@ -934,7 +806,6 @@ async fn run_inner(
     r.stages = c.trace.lock().unwrap().clone();
     r.stages.extend(strategy_checks);
     save(&mut file, &r)?;
-    release_terminal(&c, path, &r)?;
     Ok(r)
 }
 fn validate_order(v: &Value, c: &Config, r: &Report) -> Result<Value> {
@@ -1154,41 +1025,9 @@ pub async fn track(c: Config, path: &Path) -> Result<Report> {
     }
     r.stages.extend(c.trace.lock().unwrap().clone());
     save(&mut file, &r)?;
-    release_terminal(&c, path, &r)?;
     Ok(r)
 }
 
-fn reserve_submission(c: &Config, path: &Path) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let barrier = c
-        .state_dir
-        .join(format!("agentic-{}.lock", c.wallet_address.to_lowercase()));
-    let mut lock = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&barrier)
-        .context("wallet submission lock exists; inspect previous order, do not retry")?;
-    writeln!(lock, "{}", path.canonicalize()?.display())?;
-    lock.sync_all()?;
-    fs::File::open(&c.state_dir)?.sync_all()?;
-    Ok(())
-}
-fn release_terminal(c: &Config, path: &Path, r: &Report) -> Result<()> {
-    if !matches!(r.state.as_str(), "completed" | "order_failed") {
-        return Ok(());
-    }
-    let barrier = c
-        .state_dir
-        .join(format!("agentic-{}.lock", c.wallet_address.to_lowercase()));
-    if barrier.exists()
-        && fs::read_to_string(&barrier)?.trim() == path.canonicalize()?.to_string_lossy()
-    {
-        fs::remove_file(barrier)?;
-        fs::File::open(&c.state_dir)?.sync_all()?;
-    }
-    Ok(())
-}
 /// Inspect an existing order without requiring funds for a new trade.
 pub async fn inspect(c: Config, i: Intent, id: String, path: &Path) -> Result<Report> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -1368,10 +1207,14 @@ mod tests {
         }).await.unwrap()
     }
     #[tokio::test]
-    async fn explicit_missing_audit_requires_confirmation_without_inventing_risk() {
+    async fn explicit_missing_audit_is_a_warning_without_inventing_risk() {
         for (has_result, supported) in [(false, false), (false, true), (true, false)] {
             let r = audit_preparation(Ok(json!({"hasResult":has_result,"isSupported":supported,"riskLevel":-1,"riskItems":[{"isHit":true}]})), "10", "0.02").await;
-            assert_eq!(r.state, "audit_confirmation_required");
+            assert_eq!(r.state, "ready");
+            assert!(r.error.is_none());
+            assert_eq!(r.token_audit["status"], "unavailable");
+            assert_eq!(r.token_audit["severity"], "warning");
+            assert_eq!(r.token_audit["confirmation_required"], false);
             assert_eq!(r.token_audit["hasResult"], has_result);
             assert_eq!(r.token_audit["isSupported"], supported);
             assert!(r.token_audit.get("riskLevel").is_none());
@@ -1381,7 +1224,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn risk_malformed_and_unrelated_failures_cannot_use_missing_audit_confirmation() {
+    async fn known_risks_malformed_data_and_insufficient_balance_still_block() {
         let mut flagged = low_risk_audit();
         flagged["riskItems"][0]["details"][0]["isHit"] = json!(true);
         // Even a supplied status cannot turn a real risk into an unavailable audit.
@@ -1404,144 +1247,11 @@ mod tests {
         ] {
             let r = audit_preparation(audit, "10", "0.02").await;
             assert_eq!(r.state, "blocked");
-            let r = review_preparation(
-                &config(),
-                r,
-                false,
-                |_| std::future::ready(Err(anyhow!("must not refresh"))),
-                |_| panic!("blocked report offered confirmation"),
-            )
-            .await
-            .unwrap();
-            assert_eq!(r.state, "blocked");
         }
         let r = audit_preparation(Ok(no_audit()), "1", "0.02").await;
         assert_eq!(r.state, "blocked");
         assert_eq!(r.error.as_deref(), Some("insufficient sell balance"));
         assert!(r.token_audit.is_null());
-    }
-    #[tokio::test]
-    async fn manual_acknowledgement_is_specific_and_recorded_for_one_order() {
-        let r = audit_preparation(Ok(no_audit()), "10", "0.02").await;
-        let ready = review_preparation(
-            &config(),
-            r,
-            false,
-            |_| async { Ok(audit_preparation(Ok(no_audit()), "10", "0.02").await) },
-            |_| Ok("CONFIRM WITHOUT AUDIT\n".into()),
-        )
-        .await
-        .unwrap();
-        assert_eq!(ready.state, "ready");
-        assert_eq!(ready.token_audit["status"], "unavailable");
-        assert_eq!(ready.token_audit["confirmation_required"], false);
-        assert!(ready.token_audit.get("riskLevel").is_none());
-        let ack = ready.audit_acknowledgement.unwrap();
-        assert_eq!(ack["scope"], "this_order_only");
-        assert_eq!(ack["intent"], serde_json::to_value(intent()).unwrap());
-        assert_eq!(ack["wallet_address"], ready.wallet_address);
-        assert_eq!(ack["config_sha256"], ready.config_sha256);
-        let next = audit_preparation(Ok(no_audit()), "10", "0.02").await;
-        assert_eq!(next.state, "audit_confirmation_required");
-        assert!(next.audit_acknowledgement.is_none());
-        for answer in ["CONFIRM", "yes", "", "confirm without audit"] {
-            let r = audit_preparation(Ok(no_audit()), "10", "0.02").await;
-            let cancelled = review_preparation(
-                &config(),
-                r,
-                false,
-                |_| std::future::ready(Err(anyhow!("must not refresh"))),
-                |_| Ok(answer.into()),
-            )
-            .await
-            .unwrap();
-            assert_eq!(cancelled.state, "cancelled");
-            assert!(cancelled.audit_acknowledgement.is_none());
-        }
-    }
-    #[tokio::test]
-    async fn automatic_execution_cannot_acknowledge_unavailable_audit() {
-        let r = audit_preparation(Ok(no_audit()), "10", "0.02").await;
-        let stopped = review_preparation(
-            &config(),
-            r,
-            true,
-            |_| std::future::ready(Err(anyhow!("must not refresh"))),
-            |_| panic!("automatic strategy prompted for acknowledgement"),
-        )
-        .await
-        .unwrap();
-        assert_ne!(stopped.state, "ready");
-        assert_eq!(stopped.state, "audit_confirmation_required");
-        assert!(stopped.audit_acknowledgement.is_none());
-    }
-    #[tokio::test]
-    async fn fresh_audit_risk_balance_and_quote_still_stop_an_acknowledged_order() {
-        let mut high = low_risk_audit();
-        high["riskLevel"] = json!(5);
-        for (audit, balance, output, state) in [
-            (high, "10", "0.02", "blocked"),
-            (no_audit(), "1", "0.02", "blocked"),
-            (no_audit(), "10", "0.019", "quote_changed"),
-        ] {
-            let old = audit_preparation(Ok(no_audit()), "10", "0.02").await;
-            let fresh = audit_preparation(Ok(audit), balance, output).await;
-            let mut fresh = Some(fresh);
-            let stopped = review_preparation(
-                &config(),
-                old,
-                false,
-                |_| std::future::ready(Ok(fresh.take().unwrap())),
-                |_| Ok("CONFIRM WITHOUT AUDIT".into()),
-            )
-            .await
-            .unwrap();
-            assert_eq!(stopped.state, state);
-            assert!(stopped.audit_acknowledgement.is_some());
-        }
-    }
-    #[tokio::test]
-    async fn audit_becoming_unavailable_needs_new_specific_confirmation_and_refresh() {
-        let old = audit_preparation(Ok(low_risk_audit()), "10", "0.02").await;
-        let mut prompts = vec![];
-        let ready = review_preparation(
-            &config(),
-            old,
-            false,
-            |_| async { Ok(audit_preparation(Ok(no_audit()), "10", "0.02").await) },
-            |report| {
-                let phrase = confirmation_phrase(report).unwrap();
-                prompts.push(phrase);
-                Ok(phrase.into())
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(prompts, vec!["CONFIRM", "CONFIRM WITHOUT AUDIT"]);
-        assert_eq!(ready.state, "ready");
-        assert!(ready.audit_acknowledgement.is_some());
-    }
-    #[tokio::test]
-    async fn audit_acknowledgement_cannot_cover_another_intent_or_wallet() {
-        for field in ["amount", "wallet", "config"] {
-            let old = audit_preparation(Ok(no_audit()), "10", "0.02").await;
-            let mut fresh = audit_preparation(Ok(no_audit()), "10", "0.02").await;
-            match field {
-                "amount" => fresh.intent.amount = "5".into(),
-                "wallet" => fresh.wallet_address = format!("0x{}", "4".repeat(40)),
-                _ => fresh.config_sha256 = "different-config".into(),
-            }
-            let mut fresh = Some(fresh);
-            assert!(review_preparation(
-                &config(),
-                old,
-                false,
-                |_| std::future::ready(Ok(fresh.take().unwrap())),
-                |_| Ok("CONFIRM WITHOUT AUDIT".into())
-            )
-            .await
-            .is_err());
-        }
     }
     fn transfer(token: &str, from: &str, to: &str, amount: &str) -> Value {
         json!({"address":token,"topics":[TRANSFER,format!("0x{:0>64}",&from[2..]),format!("0x{:0>64}",&to[2..])],"data":format!("0x{:0>64}",units(amount,18).unwrap().to_str_radix(16)),"removed":false})
@@ -1632,31 +1342,6 @@ mod tests {
             bad["list"][0][k] = v;
             assert!(validate_order(&bad, &c, &r).is_err());
         }
-    }
-    #[test]
-    fn durable_wallet_barrier_blocks_different_report_paths_until_terminal() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut c = config();
-        c.state_dir = tmp.path().to_path_buf();
-        let first = tmp.path().join("first.json");
-        let other = tmp.path().join("other.json");
-        fs::write(&first, "{}").unwrap();
-        fs::write(&other, "{}").unwrap();
-        reserve_submission(&c, &first).unwrap();
-        assert!(reserve_submission(&c, &other).is_err());
-        let mut r = order_report(&c, intent(), "123".into()).unwrap();
-        r.state = "submission_outcome_unknown".into();
-        release_terminal(&c, &first, &r).unwrap();
-        assert!(reserve_submission(&c, &other).is_err());
-        r.state = "settled_with_discrepancy".into();
-        assert!(r.has_settlement());
-        release_terminal(&c, &first, &r).unwrap();
-        assert!(reserve_submission(&c, &other).is_err());
-        r.state = "completed".into();
-        release_terminal(&c, &other, &r).unwrap();
-        assert!(reserve_submission(&c, &other).is_err());
-        release_terminal(&c, &first, &r).unwrap();
-        reserve_submission(&c, &other).unwrap();
     }
     #[derive(Clone)]
     struct Script(Arc<Mutex<std::collections::VecDeque<Value>>>);

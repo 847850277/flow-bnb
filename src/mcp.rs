@@ -219,7 +219,7 @@ impl FlowBnbMcpServer {
 #[tool_router]
 impl FlowBnbMcpServer {
     #[tool(
-        description = "Read wallet connection and pending login progress. Does not install, sign in or trade. During pairing poll every 3–5 seconds and show the official login_url and pairing_code to the user."
+        description = "Read wallet connection, configured token addresses/amount limits, execution mode and pending login progress. Does not install, sign in or trade. During pairing poll every 3–5 seconds and show the official login_url and pairing_code to the user."
     )]
     pub async fn get_bnb_connection(&self) -> Result<Json<Map<String, Value>>, String> {
         let state = self
@@ -236,7 +236,10 @@ impl FlowBnbMcpServer {
         let config = crate::setup::config_path(&self.root);
         json_object(match crate::setup::connection_status(&config).await {
             Ok(address) => {
-                serde_json::json!({"phase":"connected","connected":true,"wallet_address":address})
+                let c = crate::agentic::Config::read(&config).map_err(|e| e.to_string())?;
+                serde_json::json!({"phase":"connected","connected":true,"wallet_address":address,
+                    "execution_mode":"direct","confirmation_required":false,
+                    "tokens":c.tokens,"max_slippage_bps":c.max_slippage_bps})
             }
             Err(_) => {
                 serde_json::json!({"phase":"disconnected","connected":false,"message":"Ask the user to connect the wallet with connect_bnb_wallet. This does not authorize trading."})
@@ -296,7 +299,7 @@ impl FlowBnbMcpServer {
     }
     #[tool(
         name = "execute_bnb_authorized_strategy",
-        description = "REAL AUTOMATIC TRADING under an existing operator-created strategy authorization. May submit ONE native order WITHOUT terminal CONFIRM. Cannot override strategy, amount, wallet or limits. Requires a stable request_id per evaluation; retries return the same record and never replay. Starts background work: query get_bnb_authorized_execution and keep MCP running. New evaluations need new IDs only after previous results are terminal and safe. Not a scheduler.",
+        description = "REAL AUTOMATIC TRADING under an existing operator-created strategy authorization. May submit ONE native order WITHOUT terminal CONFIRM. Cannot override strategy, amount, wallet or limits. Requires a stable request_id per evaluation; retries return the same record and never replay. Starts background work: query get_bnb_authorized_execution and keep MCP running. New independent evaluations use new IDs; never use them to replay an unknown order. Not a scheduler.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -338,7 +341,7 @@ impl FlowBnbMcpServer {
     }
     #[tool(
         name = "refresh_bnb_authorized_execution",
-        description = "Read-only order and receipt refresh for an existing automatic execution with an order ID. Never resubmits or refunds budget. Does not automatically clear a halt.",
+        description = "Read-only order and receipt refresh for an existing automatic execution with an order ID. Never resubmits or refunds budget. Keeps the original budget reservation and never starts a new order.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -448,10 +451,10 @@ impl FlowBnbMcpServer {
 
     #[tool(
         name = "request_bnb_strategy_execution",
-        description = "Evaluate a reviewed saved strategy afresh and QUEUE at most one triggered intent for operator confirmation. Requires source sha256 and stable request_id; retries must reuse ID and inputs. Freezes YAML/inputs; operator rechecks conditions after confirmation before submitting. Not a background scheduler; never signs or submits. Existing execution status/cancel/refresh tools accept returned intent_id.",
+        description = "REAL TRADING: evaluate a saved strategy and start at most one triggered native order without a terminal prompt. Use only when the user requests execution. Requires source sha256 and stable request_id; retries reuse ID and inputs. Freezes YAML/inputs and rechecks conditions before submission. Keep MCP running and poll get_agentic_execution with the returned intent_id. Not a scheduler.",
         annotations(
             read_only_hint = false,
-            destructive_hint = false,
+            destructive_hint = true,
             open_world_hint = true
         )
     )]
@@ -463,7 +466,7 @@ impl FlowBnbMcpServer {
         let snapshot =
             crate::strategy::Snapshot::new(&source, a.inputs).map_err(|e| e.to_string())?;
         agentic_inbox(&self.root)?
-            .enqueue_strategy(a.request_id, snapshot)
+            .execute_strategy(a.request_id, snapshot, true)
             .await
             .map_err(|e| e.to_string())
             .and_then(json_object)
@@ -471,11 +474,11 @@ impl FlowBnbMcpServer {
 
     #[tool(
         name = "request_agentic_execution",
-        description = "Queue one native Agentic Wallet trade for an operator. Requires a stable request_id: reuse it with identical arguments on transport retries; never create a replacement to retry a trade. Uses operator-owned configuration and local token limits. Does not submit or approve; an operator's agentic-operator terminal must prepare afresh and confirm. An audit_confirmation_required preview may be queued on the user's trade request; the operator must acknowledge the unavailable audit for this exact order. The model cannot provide that acknowledgement.",
+        description = "REAL TRADING: start one native Agentic Wallet trade directly, without CONFIRM or agentic-operator. Use only for an explicit execution request, not a quote question. Preparation and submission run in the background; keep MCP running and poll get_agentic_execution. Use a stable request_id and identical arguments on retries; never replace an ID to replay a pending or unknown order. Missing audit data is reported as a warning. No separate strategy authorization or YAML is required for a simple trade.",
         annotations(
             read_only_hint = false,
-            destructive_hint = false,
-            open_world_hint = false
+            destructive_hint = true,
+            open_world_hint = true
         )
     )]
     fn request_agentic_execution(
@@ -483,7 +486,7 @@ impl FlowBnbMcpServer {
         Parameters(args): Parameters<AgenticExecutionArgs>,
     ) -> Result<Json<Map<String, Value>>, String> {
         agentic_inbox(&self.root)?
-            .enqueue(args.request_id, args.intent)
+            .start(args.request_id, args.intent)
             .map_err(|e| e.to_string())
             .and_then(json_object)
     }
@@ -509,7 +512,7 @@ impl FlowBnbMcpServer {
 
     #[tool(
         name = "cancel_agentic_execution",
-        description = "Cancel a queued native trade only before an operator claims it. Does not revoke, cancel or undo a submitted on-chain order.",
+        description = "Cancel an old queued native request only before execution starts. Execution tools normally start immediately. Cannot undo an order already executing or submitted.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -548,7 +551,7 @@ impl FlowBnbMcpServer {
 
     #[tool(
         name = "prepare_agentic_trade",
-        description = "Read-only native Agentic Wallet preparation through Flow: account binding, local token amount/slippage limits, on-chain balances, quote and token audit. Does not submit. audit_confirmation_required means Binance explicitly has no usable audit data, not that the token failed an audit. Show token_audit.message and next_action. On the user's trade request, queue with request_agentic_execution; the operator must type CONFIRM WITHOUT AUDIT for this one order. Do not bypass Flow, mark unavailable data safe, or supply acknowledgement through MCP. Known risks and other check failures remain blocked. Uses operator-configured FLOW_BNB_AGENTIC_CONFIG. Limits differ from legacy Web3 execution policy.",
+        description = "Read-only quote and preparation: account, balances, token amount/slippage limits and audit. Never submits. Missing audit data returns ready with token_audit.status=unavailable and a warning, not a safety claim or confirmation requirement. Known risks and malformed responses still block. On an explicit execution request use request_agentic_execution directly; it performs fresh preparation itself. No need to call this preview first.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -598,9 +601,9 @@ impl FlowBnbMcpServer {
             chain_id: "56".to_owned(),
             network: "BNB Smart Chain mainnet".to_owned(),
             templates: vec![
-                TemplateInfo::new(FlowTemplate::StockStrategy, "Editable native quote -> exact minimum receive threshold -> trade decision. Run with run_bnb_strategy; queue with request_bnb_strategy_execution. No Web3 key needed."),
+                TemplateInfo::new(FlowTemplate::StockStrategy, "Editable native quote -> exact minimum receive threshold -> trade decision. Preview with run_bnb_strategy; execute with request_bnb_strategy_execution. No Web3 key needed."),
                 TemplateInfo::new(FlowTemplate::StockSpreadStrategy, "RWA token price vs API reference price -> exact signed basis-point threshold -> candidate intent. Validates token identity and token-price age. Requires Web3 credentials. The reference is token-derived per-share data, not an independent equity quote. Read-only preview via run_bnb_strategy."),
-                TemplateInfo::new(FlowTemplate::AgenticStage, "Native wallet checks, quotes and operator-only order submission through a local process adapter; requires agentic-trade, not generic HTTP run."),
+                TemplateInfo::new(FlowTemplate::AgenticStage, "Native wallet checks, quotes and order submission through a local process adapter; use the native execution tool or agentic-trade --execute."),
                 TemplateInfo::new(FlowTemplate::AgenticOrder, "Bounded native order polling through the local adapter; use agentic-track or inspect_agentic_order."),
                 TemplateInfo::new(FlowTemplate::TransactionReceipt, "Track an existing transaction via read-only JSON-RPC with bounded polling and confirmation checks; requires the flow-bnb receipt adapter."),
                 TemplateInfo::new(
@@ -628,9 +631,9 @@ impl FlowBnbMcpServer {
                 "User strategy profile: 64 KiB YAML, 16 KiB inputs, 30 seconds, 32 requests, at most one decision. Local POST https://flow-bnb.invalid/strategy/{quote,compare,rwa-spread,decision}; only official Web3 RWA platforms/search/price and wallet balances GETs. File bodies, custom auth, arbitrary network destinations and direct signing/submission are blocked. compare accepts nonnegative decimal strings and eq/gt/gte/lt/lte. decision accepts {triggered:boolean,intent:AgenticIntent}. Native quote accepts AgenticIntent and returns data.toCoinAmount. Conditional steps and bounded loops use standard Flow YAML. Runtime checks every rendered URL.".to_owned(),
                 "rwa-spread accepts {prices: RWA price data array, stock_token, intent, operator: eq/gt/gte/lt/lte, threshold_bps: signed integer, max_age_seconds: 1..86400}. Exactly one BSC row must match the monitored token and a token in the intent. Positive bps is above reference, negative below. Uses exact arithmetic; displayed bps/percent are truncated to six decimal places. Rejects missing, zero, malformed, stale or future-dated prices. referencePrice is token-derived per-share data; its independent timestamp is unavailable. This is an API-field deviation, not a claim of equity-market arbitrage.".to_owned(),
                 "MCP tools never accept Binance API credentials or wallet private keys; receipt reports omit the provider RPC URL.".to_owned(),
-                "Manual requests queue intents for operator review. Automatic execution needs an operator-created frozen strategy mandate with exact intent, cumulative budget, order count, cooldown and expiry. Generated flows themselves never sign or broadcast.".to_owned(),
-                "Legacy Web3 execution policy requires BSC, size/slippage/impact limits, successful simulation, and explicit operator confirmation.".to_owned(),
-                "Native Agentic Wallet uses separate token-quantity/slippage limits and account/balance/audit gates; it does not inherit legacy USD, price-impact or simulation guarantees. Explicit unavailable audit flags produce audit_confirmation_required: a manual operator can accept the missing audit for one order with CONFIRM WITHOUT AUDIT; all checks run again, and new risks or worse quotes stop submission. Automatic mandates cannot accept unavailable audits. Native execution tools durably queue, query, cancel unclaimed requests and refresh existing orders; Manual execution uses agentic-operator confirmation; execute_bnb_authorized_strategy may submit within a pre-authorized mandate without a per-order prompt. Unknown outcomes or discrepancies halt automatic execution.".to_owned(),
+                "Explicit execution requests start native orders directly. Optional strategy mandates provide cumulative budgets, order counts, cooldown and expiry. Generated strategy flows calculate decisions; the native adapter submits triggered orders.".to_owned(),
+                "Legacy Web3 execution checks BSC, size/slippage/impact limits and successful simulation, then hands the prepared transaction directly to the selected signer.".to_owned(),
+                "Native execution tools directly start real orders without terminal confirmation. Quote/preparation tools remain read-only. Unavailable token audit data is a warning; known risks and malformed responses block preparation. No wallet-wide execution lock is used. Request IDs prevent duplicate submission; receipt discrepancies and unknown outcomes remain visible and must never trigger automatic replay. Token amount/slippage limits differ from the legacy Web3 USD/price-impact/simulation policy.".to_owned(),
                 "Use an isolated signer or Binance Agentic Wallet only after policy approval.".to_owned(),
             ],
         })
@@ -643,7 +646,7 @@ impl FlowBnbMcpServer {
             destructive_hint = false,
             open_world_hint = false
         ),
-        description = "Queue a trade intent for an OPERATOR to review. Does not approve, sign or broadcast. Uses operator-configured FLOW_BNB_HANDOFF_DIR. The operator CLI obtains fresh evidence and requests terminal confirmation; no caller-supplied policy, signer or approval is accepted."
+        description = "Queue a trade intent for an OPERATOR to review. Does not approve, sign or broadcast. Uses operator-configured FLOW_BNB_HANDOFF_DIR. The local CLI obtains fresh evidence and hands off to its selected wallet; no caller-supplied policy, signer or approval is accepted."
     )]
     fn request_trade_execution(
         &self,
@@ -791,7 +794,7 @@ impl FlowBnbMcpServer {
 
     #[tool(
         name = "evaluate_trade_policy",
-        description = "Evaluate a BSC trade intent against deterministic size, slippage, price-impact, token allowlist, simulation, and confirmation gates."
+        description = "Evaluate a BSC trade intent against deterministic size, slippage, price-impact, token allowlist, and simulation checks."
     )]
     fn evaluate_trade_policy(
         &self,
@@ -825,11 +828,6 @@ impl FlowBnbMcpServer {
                     "flow",
                 ),
                 PlanStage::new(
-                    "confirm",
-                    "Request explicit operator confirmation",
-                    "operator",
-                ),
-                PlanStage::new(
                     "sign",
                     "Hand approved calldata to an isolated signer; native Agentic orders use a separate workflow",
                     "external",
@@ -852,7 +850,7 @@ impl ServerHandler for FlowBnbMcpServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("flow-bnb-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Onboarding: call get_bnb_connection to check connection. On user request use connect_bnb_wallet, then poll get_bnb_connection every 3–5 seconds. Show the official login_url and pairing_code; the user confirms in Binance App. Installation/login never authorize a trade. Automatic mode: inspect get_bnb_strategy_authorization first. When the user requests execution under an existing mandate, call execute_bnb_authorized_strategy with authorization_id and stable request_id, then poll get_bnb_authorized_execution. This can trade without CONFIRM. MCP cannot create, edit or expand mandates. Use revoke_bnb_strategy_authorization to stop future submissions. Never replace request IDs to recover unknown execution. Manual mode remains available. For user-authored strategies: generate stock_strategy for native quote thresholds or stock_spread_strategy for RWA token/reference deviation (the reference is token-derived per-share data), edit YAML, validate_bnb_flow, save_bnb_flow, read_bnb_flow, then run_bnb_strategy for a read-only preview. On user request call request_bnb_strategy_execution with the reviewed source hash and stable request_id. This queues only a triggered decision; operator rechecks frozen strategy after terminal confirmation. Query/cancel/refresh with existing agentic execution tools. Never treat a dry run as approval or replace an existing ID to retry. Start with list_bnb_capabilities. Generate and validate a template, evaluate the trade policy, then build an execution plan. Never ask for private keys or API secrets. For native Agentic Wallet use prepare_agentic_trade and request_agentic_execution with a stable request_id, then get_agentic_execution to retrieve the operator result. Never generate a replacement ID to retry a submitted or unknown order. Manual requests require operator terminal confirmation; automatic submission is allowed only under an operator-created mandate. Wallet signing remains in Agentic Wallet.",
+                "Check get_bnb_connection when connection status or configured token addresses/limits are unknown; use its tokens to resolve symbols without reading files or generating code. Use connect_bnb_wallet only when disconnected, then show the login_url and pairing_code for the user to pair in Binance App. For a quote or a question about buying, use prepare_agentic_trade (read-only). When the user explicitly requests a trade, call request_agentic_execution with a stable request_id; it prepares and executes directly. No CONFIRM, operator terminal, strategy authorization, generated code, YAML, policy evaluation or execution-plan call is required for a simple trade. Keep MCP running and poll get_agentic_execution every 3–5 seconds. Do not treat an executing response as completed. On retries reuse the same request_id and identical intent; never use a new ID to replay an unknown or submitted order. Show unavailable audits as warnings without claiming safety. For conditional strategies, generate/edit a strategy template, validate/save it, then run_bnb_strategy for a read-only preview or request_bnb_strategy_execution for explicitly requested execution with its source hash and stable ID. Conditions are rechecked before submission. Existing strategy authorizations are optional budgets, not an onboarding prerequisite. Use execute_bnb_authorized_strategy only when the user chooses an existing authorization. Never ask for private keys or API secrets. Wallet signing remains in Agentic Wallet.",
             )
     }
 }
@@ -1006,6 +1004,29 @@ mod tests {
         for value in [json!(null), json!([]), json!(true), json!(1), json!("text")] {
             assert!(json_object(value).is_err());
         }
+    }
+
+    #[test]
+    fn native_execution_tools_disclose_real_side_effects() {
+        let tools = FlowBnbMcpServer::tool_router().list_all();
+        for name in [
+            "request_agentic_execution",
+            "request_bnb_strategy_execution",
+        ] {
+            let tool = tools.iter().find(|t| t.name == name).unwrap();
+            let annotations = serde_json::to_value(&tool.annotations).unwrap();
+            assert_eq!(annotations["readOnlyHint"], false);
+            assert_eq!(annotations["destructiveHint"], true);
+            assert_eq!(annotations["openWorldHint"], true);
+        }
+        let preview = tools
+            .iter()
+            .find(|t| t.name == "prepare_agentic_trade")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&preview.annotations).unwrap()["readOnlyHint"],
+            true
+        );
     }
 
     #[test]

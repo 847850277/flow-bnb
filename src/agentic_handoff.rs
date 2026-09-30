@@ -1,6 +1,9 @@
-//! Native-order handoff: MCP writes intents, an operator terminal executes them.
-//! A durable claim is never reset; refreshing a report is strictly read-only.
-use crate::{agentic, handoff::TypedInbox};
+//! Native execution with durable request deduplication. Explicit execution calls
+//! start work; opening an inbox never drains historical requests.
+use crate::{
+    agentic,
+    handoff::{Claim, TypedInbox},
+};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -18,6 +21,7 @@ pub struct Request {
     pub strategy: Option<crate::strategy::Binding>,
 }
 
+#[derive(Clone)]
 pub struct Inbox {
     config: agentic::Config,
     directory: PathBuf,
@@ -38,6 +42,49 @@ impl Inbox {
     /// Client-provided retry key deduplicates network retries of the same request.
     pub fn enqueue(&self, request_id: String, intent: agentic::Intent) -> Result<Value> {
         self.enqueue_bound(request_id, intent, None)
+    }
+
+    /// Claim synchronously before returning, then execute in the MCP runtime.
+    pub fn start(&self, request_id: String, intent: agentic::Intent) -> Result<Value> {
+        let queued = self.enqueue(request_id, intent)?;
+        self.start_id(queued["intent_id"].as_str().context("missing intent ID")?)
+    }
+
+    fn start_id(&self, id: &str) -> Result<Value> {
+        let Some(claim) = self.claim(id)? else {
+            return self.status(id);
+        };
+        let status = self.status(id)?;
+        let inbox = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = inbox.execute_claim(claim).await {
+                tracing::error!("Native execution stopped: {e:#}");
+            }
+        });
+        Ok(status)
+    }
+
+    /// Evaluate the frozen strategy, then execute a triggered decision. CLI callers
+    /// await completion; MCP callers keep the server running and poll the returned ID.
+    pub async fn execute_strategy(
+        &self,
+        request_id: String,
+        snapshot: crate::strategy::Snapshot,
+        background: bool,
+    ) -> Result<Value> {
+        let evaluation = self.enqueue_strategy(request_id, snapshot).await?;
+        let Some(id) = evaluation["intent_id"].as_str() else {
+            return Ok(evaluation);
+        };
+        let mut result = if background {
+            self.start_id(id)?
+        } else {
+            self.execute(id).await?
+        };
+        if let Some(run) = evaluation.get("strategy_run") {
+            result["strategy_run"] = run.clone();
+        }
+        Ok(result)
     }
 
     fn request_key(request_id: &str) -> Result<String> {
@@ -136,7 +183,7 @@ impl Inbox {
                 .wallet_address
                 .eq_ignore_ascii_case(&self.config.wallet_address)
                 && request.config_sha256 == agentic::digest(&self.config)?,
-            "operator configuration changed since enqueue; review and create a new request"
+            "wallet configuration changed since this request was saved"
         );
         self.config.rules(&request.intent)?;
         Ok(())
@@ -188,10 +235,14 @@ impl Inbox {
             "intent":queued.request.intent, "wallet_address":queued.request.wallet_address,
             "strategy":queued.request.strategy,
             "message":journal.message, "result":null,
-            "operator_message":journal.message,
             "can_cancel":journal.state=="awaiting_operator", "retry_execution":false,
-            "next_action":"An operator runs agentic-operator with this intent_id, or --watch. Query this ID for results; never replace it to retry a trade."
+            "next_action":"Query get_agentic_execution with this intent_id. Keep MCP running while executing; reuse the original request_id on transport retries."
         });
+        if journal.state == "awaiting_operator" {
+            value["state"] = json!("queued");
+            value["message"] = json!("Saved request has not started; no transaction submitted.");
+            value["next_action"] = json!("Repeat the original execution request with the same request_id to start it, or cancel this intent. Old requests are not started automatically.");
+        }
         let report = match self.read_report(id) {
             Ok(report) => report,
             Err(e) => {
@@ -199,6 +250,8 @@ impl Inbox {
                 value["can_cancel"] = json!(false);
                 value["message"] = json!("Execution evidence is unreadable or does not match the intent. Inspect existing records; never resubmit.");
                 value["result"] = json!({"error":e.to_string()});
+                value["next_action"] =
+                    json!("Inspect existing order records; this request cannot be replayed.");
                 return Ok(value);
             }
         };
@@ -213,23 +266,35 @@ impl Inbox {
             value["can_cancel"] = json!(false);
             value["result"] = json!({
                 "order_id":r.order_id, "order_status":r.order["status"],
-                "tx_hash":r.order["txHash"], "settlement":r.settlement, "error":r.error
+                "tx_hash":r.order["txHash"], "settlement":r.settlement,
+                "token_audit":r.token_audit, "error":r.error
             });
             value["message"] = json!(match state {
                 "completed" => "Order and on-chain transfers verified.",
-                "settled_with_discrepancy" => "On-chain trade verified with an amount discrepancy. Review required; wallet lock retained. Never resubmit or automatically sell the difference.",
+                "settled_with_discrepancy" => "On-chain trade verified with an amount discrepancy. Compare actual transfers in the result; this does not lock the wallet or authorize another order.",
+                "not_triggered" => "The strategy condition no longer holds. No order was submitted.",
                 "cancelled" | "blocked" | "quote_changed" | "strategy_blocked" | "not_submitted" => "No order submitted by this attempt. The intent remains claimed and cannot replay.",
                 _ => "Inspect the existing order; use refresh_agentic_execution when an order ID is available. Never resubmit."
             });
+            value["next_action"] = json!(match state {
+                "completed" => "Execution finished. Show the order, transaction hash and received amount.",
+                "settled_with_discrepancy" => "Execution finished. Show the actual transfers and discrepancy; do not automatically retry or sell the difference.",
+                "not_triggered" | "cancelled" | "blocked" | "quote_changed" | "strategy_blocked" | "not_submitted" => "Show why this attempt did not submit. No further polling is needed.",
+                _ => "Inspect the existing order. Use refresh_agentic_execution if an order ID is available; never replay this request."
+            });
         } else if self.report_path(id)?.try_exists()? {
-            value["state"] = json!("operator_active");
+            value["state"] = json!("executing");
             value["can_cancel"] = json!(false);
-            value["message"] = json!("Operator or read-only verifier holds the report lock. Query this intent again; do not resubmit.");
+            value["message"] = json!(
+                "Execution or read-only verification is in progress. Query this intent again."
+            );
         } else if !matches!(journal.state.as_str(), "awaiting_operator" | "cancelled") {
             let journal = fs::File::open(self.directory.join(format!("{id}.journal.jsonl")))?;
             if journal.try_lock_shared().is_ok() {
                 value["state"] = json!("claimed_outcome_unknown");
-                value["message"] = json!("Operator is no longer active and no report is available. Inspect wallet and journal; never resubmit.");
+                value["message"] = json!("Execution stopped and no report is available. Inspect wallet and journal; never replay this request.");
+                value["next_action"] =
+                    json!("Inspect existing order records; this request cannot be replayed.");
             }
         }
         Ok(value)
@@ -244,36 +309,43 @@ impl Inbox {
         Ok(self.queue.pending()?.into_iter().map(|i| i.id).collect())
     }
 
-    /// Only the local operator CLI calls this; native run requires /dev/tty confirmation.
-    pub async fn approve(&self, id: &str) -> Result<Value> {
+    /// A durable claim deduplicates only this request; it never locks the wallet.
+    fn claim(&self, id: &str) -> Result<Option<Claim<Request>>> {
         let request = self.queue.intent(id)?.request;
         self.check_binding(&request)?;
-        let barrier = self.config.state_dir.join(format!(
-            "agentic-{}.lock",
-            self.config.wallet_address.to_lowercase()
-        ));
-        ensure!(
-            !barrier.try_exists()?,
-            "wallet submission lock exists; resolve previous order before claiming another intent"
-        );
-        if let Some(binding) = &request.strategy {
-            let snapshot = binding.load(&self.config)?;
-            println!(
-                "Strategy snapshot {} (inputs and flow):\n{}",
-                binding.snapshot_sha256,
-                serde_json::to_string_pretty(&snapshot)?
-            );
+        if self.queue.status(id)?.state != "awaiting_operator" {
+            return Ok(None);
         }
-        let mut claim = self.queue.claim(id)?;
+        if let Some(binding) = &request.strategy {
+            binding.load(&self.config)?;
+        }
+        let mut claim = match self.queue.claim(id) {
+            Ok(claim) => claim,
+            // A concurrent request or cancellation may have claimed the ID.
+            Err(_) if self.queue.status(id)?.state != "awaiting_operator" => return Ok(None),
+            Err(e) => return Err(e),
+        };
         claim.record(
-            "operator_active",
-            "Operator is preparing, reviewing or tracking. This intent cannot be claimed again.",
+            "executing",
+            "Preparing and executing the requested trade. This request cannot submit twice.",
         )?;
-        println!("Reviewing queued Agentic Wallet intent: {id}");
+        Ok(Some(claim))
+    }
+
+    /// Foreground compatibility entry point for an explicitly selected saved request.
+    pub async fn execute(&self, id: &str) -> Result<Value> {
+        if let Some(claim) = self.claim(id)? {
+            self.execute_claim(claim).await?;
+        }
+        self.status(id)
+    }
+
+    async fn execute_claim(&self, mut claim: Claim<Request>) -> Result<()> {
+        let request = claim.intent.request.clone();
         match agentic::run_with_strategy(
             self.config.clone(),
             request.intent,
-            &self.report_path(id)?,
+            &self.report_path(&claim.intent.id)?,
             true,
             request.strategy,
         )
@@ -281,14 +353,14 @@ impl Inbox {
         {
             Ok(r) => claim.record(
                 &r.state,
-                "Operator run finished; inspect the bound native report.",
+                "Execution finished; inspect the bound native report.",
             )?,
             Err(e) => claim.record(
                 "needs_attention",
-                &format!("Operator stopped: {e}. Inspect existing evidence; do not resubmit."),
+                &format!("Execution stopped: {e}. Inspect existing evidence; do not resubmit."),
             )?,
         }
-        self.status(id)
+        Ok(())
     }
 
     /// Resumes existing evidence only. This cannot call native swap or create a claim.
@@ -297,7 +369,7 @@ impl Inbox {
         self.check_binding(&request)?;
         let report = self
             .read_report(id)?
-            .context("no readable report; operator may still be active")?;
+            .context("no readable report; execution may still be active")?;
         ensure!(
             report.order_id.is_some(),
             "no order ID; cannot refresh or resubmit automatically"
@@ -379,7 +451,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_change_and_unresolved_wallet_block_before_claiming_or_wallet_io() {
+    async fn config_change_blocks_before_claiming_or_wallet_io() {
         let (_tmp, mut c, i) = setup();
         let inbox = Inbox::open(c.clone()).unwrap();
         let queued = inbox.enqueue("request-2".into(), i).unwrap();
@@ -387,22 +459,12 @@ mod tests {
         c.max_slippage_bps = 40;
         let changed = Inbox::open(c.clone()).unwrap();
         assert!(changed
-            .approve(id)
+            .execute(id)
             .await
             .unwrap_err()
             .to_string()
             .contains("configuration changed"));
-        let barrier = c
-            .state_dir
-            .join(format!("agentic-{}.lock", c.wallet_address.to_lowercase()));
-        fs::write(barrier, "previous unresolved order").unwrap();
-        assert!(inbox
-            .approve(id)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("submission lock"));
-        assert_eq!(inbox.status(id).unwrap()["state"], "awaiting_operator");
+        assert_eq!(inbox.status(id).unwrap()["state"], "queued");
         assert!(inbox.refresh(id).await.is_err());
     }
 
@@ -413,11 +475,11 @@ mod tests {
         let queued = inbox.enqueue("request-3".into(), i.clone()).unwrap();
         let id = queued["intent_id"].as_str().unwrap();
         let mut claim = inbox.queue.claim(id).unwrap();
-        claim.record("operator_active", "testing").unwrap();
+        claim.record("executing", "testing").unwrap();
         let path = inbox.report_path(id).unwrap();
         let file = fs::File::create(&path).unwrap();
         file.lock().unwrap();
-        assert_eq!(inbox.status(id).unwrap()["state"], "operator_active");
+        assert_eq!(inbox.status(id).unwrap()["state"], "executing");
         drop(file);
         // A truncated report must not be treated as an unclaimed/retryable request.
         assert_eq!(inbox.status(id).unwrap()["state"], "needs_attention");
@@ -453,8 +515,8 @@ mod tests {
         let queued = inbox.enqueue("interrupted".into(), i).unwrap();
         let id = queued["intent_id"].as_str().unwrap();
         let mut claim = inbox.queue.claim(id).unwrap();
-        claim.record("operator_active", "fixture operator").unwrap();
-        assert_eq!(inbox.status(id).unwrap()["state"], "operator_active");
+        claim.record("executing", "fixture operator").unwrap();
+        assert_eq!(inbox.status(id).unwrap()["state"], "executing");
         drop(claim);
         let status = inbox.status(id).unwrap();
         assert_eq!(status["state"], "claimed_outcome_unknown");

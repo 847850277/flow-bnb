@@ -46,7 +46,7 @@ enum Command {
         )]
         config: PathBuf,
     },
-    /// Sign out of Agentic Wallet; preserve policies, reports and submission locks.
+    /// Sign out of Agentic Wallet; preserve configuration and historical order records.
     Disconnect {
         #[arg(
             long,
@@ -55,7 +55,7 @@ enum Command {
         )]
         config: PathBuf,
     },
-    /// Authorize a frozen strategy once; no per-order CONFIRM within this mandate.
+    /// Optionally set a cumulative budget for a frozen strategy.
     StrategyAuthorize {
         file: PathBuf,
         #[arg(
@@ -112,7 +112,7 @@ enum Command {
         #[arg(long)]
         id: String,
     },
-    /// Evaluate a user strategy without trading; optionally queue a triggered intent for an operator.
+    /// Evaluate a strategy read-only, or execute a triggered order with --execute <request-id>.
     StrategyRun {
         file: PathBuf,
         #[arg(
@@ -123,8 +123,11 @@ enum Command {
         config: PathBuf,
         #[arg(long = "input", value_name = "NAME=VALUE")]
         inputs: Vec<String>,
-        /// Stable retry key. Queues for confirmation, never directly submits a trade.
-        #[arg(long)]
+        /// Execute directly using this stable request ID. Reuse it on retries.
+        #[arg(long, conflicts_with = "enqueue")]
+        execute: Option<String>,
+        /// Legacy queue-only option. Use --execute for direct execution.
+        #[arg(long, hide = true)]
         enqueue: Option<String>,
     },
     /// Install managed wallet dependencies, pair the wallet and generate MCP configuration.
@@ -142,7 +145,7 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
-    /// Check wallet installation, login, account binding and outstanding submission locks.
+    /// Check wallet installation, login and account binding.
     Doctor {
         #[arg(
             long,
@@ -156,7 +159,7 @@ enum Command {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
-    /// Operate queued native trades; every order requires fresh terminal confirmation.
+    /// Execute one explicitly selected legacy queued request without a terminal prompt.
     AgenticOperator {
         #[arg(
             long,
@@ -164,11 +167,8 @@ enum Command {
             env = "FLOW_BNB_AGENTIC_CONFIG"
         )]
         config: PathBuf,
-        #[arg(long, required_unless_present = "watch", conflicts_with = "watch")]
-        intent_id: Option<String>,
-        /// Keep this terminal open to review incoming MCP intents, oldest first.
         #[arg(long)]
-        watch: bool,
+        intent_id: String,
     },
     /// Read a queued native trade's status, optionally refreshing its existing order.
     AgenticExecution {
@@ -183,7 +183,7 @@ enum Command {
         #[arg(long)]
         refresh: bool,
     },
-    /// Prepare a native Agentic Wallet order through Flow; --execute requests terminal confirmation.
+    /// Prepare a native order read-only; --execute submits directly without confirmation.
     AgenticTrade {
         #[arg(
             long,
@@ -224,7 +224,7 @@ enum Command {
         #[arg(long)]
         report: PathBuf,
     },
-    /// Inspect and execute one queued intent after fresh preparation and terminal confirmation.
+    /// Prepare and execute one explicitly selected queued intent through a trusted wallet.
     ApproveTrade {
         #[arg(long, env = "FLOW_BNB_HANDOFF_DIR")]
         handoff_dir: PathBuf,
@@ -266,7 +266,7 @@ enum Command {
         #[arg(long)]
         report: PathBuf,
     },
-    /// Prepare anew, confirm on the terminal, then hand off one transaction to a trusted wallet.
+    /// Prepare anew, then hand off one transaction directly to a trusted wallet.
     ExecuteTrade {
         #[arg(long)]
         request: PathBuf,
@@ -366,7 +366,7 @@ async fn main() -> Result<()> {
             };
             let result = flow_bnb::autonomy::authorize(c, id, snapshot, limits).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
-            eprintln!("策略授权已创建。授权范围内无需逐笔 CONFIRM；修改策略或额度须重新授权。授权不会启动定时任务。");
+            eprintln!("策略预算已创建；修改策略或额度须重新创建。此操作不会下单或启动定时任务。");
             Ok(())
         }
         Command::StrategyAuto {
@@ -380,7 +380,7 @@ async fn main() -> Result<()> {
             anyhow::ensure!(
                 matches!(
                     result["state"].as_str(),
-                    Some("completed" | "not_triggered")
+                    Some("completed" | "settled_with_discrepancy" | "not_triggered")
                 ),
                 "automatic execution needs attention; inspect existing record, do not replay"
             );
@@ -404,23 +404,39 @@ async fn main() -> Result<()> {
             file,
             config,
             inputs,
+            execute,
             enqueue,
         } => {
             let c = flow_bnb::agentic::Config::read(&config)?;
             let snapshot = load_strategy(&file, inputs)?;
-            let result = match enqueue {
-                Some(id) => {
+            let execution_requested = execute.is_some();
+            let result = match (execute, enqueue) {
+                (Some(id), _) => {
+                    flow_bnb::agentic_handoff::Inbox::open(c)?
+                        .execute_strategy(id, snapshot, false)
+                        .await?
+                }
+                (_, Some(id)) => {
                     flow_bnb::agentic_handoff::Inbox::open(c)?
                         .enqueue_strategy(id, snapshot)
                         .await?
                 }
-                None => serde_json::to_value(flow_bnb::strategy::run(&c, &snapshot).await?)?,
+                _ => serde_json::to_value(flow_bnb::strategy::run(&c, &snapshot).await?)?,
             };
             println!("{}", serde_json::to_string_pretty(&result)?);
             anyhow::ensure!(
                 result["success"] != false && result["state"] != "strategy_failed",
-                "strategy evaluation failed; no intent queued"
+                "strategy evaluation failed"
             );
+            if execution_requested {
+                anyhow::ensure!(
+                    matches!(
+                        result["state"].as_str(),
+                        Some("completed" | "settled_with_discrepancy" | "not_triggered")
+                    ),
+                    "strategy execution stopped; inspect the existing request"
+                );
+            }
             Ok(())
         }
         Command::Setup {
@@ -436,36 +452,15 @@ async fn main() -> Result<()> {
             service.waiting().await?;
             Ok(())
         }
-        Command::AgenticOperator {
-            config,
-            intent_id,
-            watch,
-        } => {
+        Command::AgenticOperator { config, intent_id } => {
             let inbox =
                 flow_bnb::agentic_handoff::Inbox::open(flow_bnb::agentic::Config::read(&config)?)?;
-            if let Some(id) = intent_id {
-                let status = inbox.approve(&id).await?;
-                println!("{}", serde_json::to_string_pretty(&status)?);
-                anyhow::ensure!(
-                    operator_finished(&status),
-                    "operator stopped; inspect this intent, do not resubmit"
-                );
-            } else if watch {
-                eprintln!("Waiting for queued native trades. Each order requires CONFIRM in this terminal. Ctrl-C stops the operator; queued intents remain durable.");
-                loop {
-                    if let Some(id) = inbox.pending()?.first() {
-                        let status = inbox.approve(id).await?;
-                        println!("{}", serde_json::to_string_pretty(&status)?);
-                        anyhow::ensure!(
-                            operator_finished(&status),
-                            "operator stopped; inspect this intent, do not resubmit"
-                        );
-                        anyhow::ensure!(status["state"] != "settled_with_discrepancy", "settled with discrepancy; operator paused for review, no automatic retry");
-                    } else {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    }
-                }
-            }
+            let status = inbox.execute(&intent_id).await?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            anyhow::ensure!(
+                operator_finished(&status),
+                "execution stopped; inspect this intent, do not replay"
+            );
             Ok(())
         }
         Command::AgenticExecution {
@@ -494,9 +489,7 @@ async fn main() -> Result<()> {
             let r = flow_bnb::agentic::run(c, i, &report, execute).await?;
             print_agentic_report(&r)?;
             anyhow::ensure!(
-                r.has_settlement()
-                    || matches!(r.state.as_str(), "ready" | "cancelled")
-                    || (!execute && r.state == "audit_confirmation_required"),
+                r.has_settlement() || (!execute && r.state == "ready"),
                 "Agentic Wallet workflow stopped; inspect report"
             );
             Ok(())
@@ -579,12 +572,6 @@ async fn main() -> Result<()> {
                 ];
                 (executable, config.rpc_url, args)
             };
-            // Check operator terminal and trusted adapter BEFORE permanently claiming the intent.
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/dev/tty")
-                .context("approval requires an operator terminal")?;
             let inbox = flow_bnb::handoff::Inbox::open(handoff_dir)?;
             let mut claim = inbox.claim(&intent_id)?;
             let request = claim.intent.request.clone();
@@ -700,17 +687,17 @@ async fn main() -> Result<()> {
 fn operator_finished(status: &serde_json::Value) -> bool {
     matches!(
         status["state"].as_str(),
-        Some("completed" | "settled_with_discrepancy" | "cancelled")
+        Some("completed" | "settled_with_discrepancy" | "not_triggered" | "cancelled")
     )
 }
 
 fn print_agentic_report(r: &flow_bnb::agentic::Report) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(r)?);
-    if r.state == "audit_confirmation_required" {
-        eprintln!("代币审计数据不可用，尚未下单。手动执行时需在操作员终端审阅本次交易并输入 CONFIRM WITHOUT AUDIT；自动策略不能代替用户确认。");
+    if r.token_audit["status"] == "unavailable" {
+        eprintln!("提示：代币审计数据不可用，无法据此判断安全或危险；此提示不要求额外确认。");
     }
     if r.state == "settled_with_discrepancy" {
-        eprintln!("Order settled with an amount discrepancy; review settlement. Do not resubmit. Any existing submission lock is retained.");
+        eprintln!("Order settled with an amount discrepancy; inspect actual transfers. This does not lock the wallet or authorize another order.");
     }
     Ok(())
 }
@@ -815,7 +802,7 @@ async fn trade_request_command(
     use flow_bnb::trade::{
         invoke_signer_with_args, prepare_with_transport, verify_settlement, ExecutionPolicy,
     };
-    use std::io::{BufRead, Seek, SeekFrom, Write};
+    use std::io::{Seek, SeekFrom};
     let policy: ExecutionPolicy = serde_json::from_slice(&fs::read(policy_path)?)?;
     // Reserve the audit destination before network I/O or wallet handoff.
     let mut file = fs::OpenOptions::new()
@@ -858,26 +845,13 @@ async fn trade_request_command(
         if !prepared.ready() {
             bail!("preparation blocked; no signer was invoked");
         }
-        if let Some(claim) = claim.as_deref_mut() {
-            claim.record("awaiting_confirmation","Fresh preparation completed; operator must confirm the exact action before it expires.")?;
-        }
-        // No --yes flag or MCP boolean: confirmation must come from the operator's terminal.
-        let mut terminal = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/tty")
-            .context("execution requires an interactive operator terminal")?;
-        writeln!(terminal,"Review the transaction above. Type its complete confirmation_id to submit this ONE transaction:")?;
-        terminal.flush()?;
-        let mut confirmation = String::new();
-        std::io::BufReader::new(terminal).read_line(&mut confirmation)?;
-        let signer_request = prepared.authorize(confirmation.trim())?;
+        let signer_request = prepared.into_signer_request()?;
         audit["execution"] = serde_json::json!("handoff_started_outcome_unknown_until_verified");
         save(&mut file, &audit)?;
         if let Some(claim) = claim.as_deref_mut() {
             claim.record(
                 "handoff_started_outcome_unknown",
-                "Operator confirmed; wallet submission may occur. Do not replay this intent.",
+                "Execution requested; wallet submission may occur. Do not replay this intent.",
             )?;
         }
         let response = match invoke_signer_with_args(&signer, &signer_args, &signer_request).await {

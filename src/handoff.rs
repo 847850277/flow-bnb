@@ -1,5 +1,5 @@
-//! Durable intent inbox. Files are untrusted requests, never serialized approval
-//! capabilities. Only the interactive operator CLI can prepare afresh and execute.
+//! Durable intent records shared by native execution and legacy signer handoff.
+//! A claim deduplicates a request; a saved file alone never starts execution.
 use crate::trade::TradeRequest;
 use anyhow::{ensure, Context, Result};
 use schemars::JsonSchema;
@@ -149,7 +149,7 @@ impl<T: Clone + Serialize + DeserializeOwned> TypedInbox<T> {
             message: "Intent queued; no signature or transaction has been requested.".into(),
             result: None,
         };
-        Ok(Queued {intent,status,next_action:"An operator must run flow-bnb approve-trade with this ID and operator-owned policy/wallet configuration. The CLI prepares a fresh quote and asks for terminal confirmation; MCP cannot approve it.".into()})
+        Ok(Queued {intent,status,next_action:"An operator must run flow-bnb approve-trade with this ID and operator-owned policy/wallet configuration. The CLI prepares a fresh quote and submits through the selected wallet without a terminal prompt.".into()})
     }
     pub fn intent(&self, id: &str) -> Result<Intent<T>> {
         let path = self.path(id, "intent.json")?;
@@ -272,7 +272,7 @@ impl<T: Clone + Serialize + DeserializeOwned> TypedInbox<T> {
             file,
             audit_path: self.path(id, "audit.json")?,
         };
-        claim.record("preparing", "Claimed by operator; preparing a fresh quote.")?;
+        claim.record("preparing", "Execution claimed; preparing a fresh quote.")?;
         Ok(claim)
     }
     pub fn cancel(&self, id: &str) -> Result<Status> {

@@ -116,6 +116,7 @@ pub struct TradeReport {
     pub simulation_status: Option<String>,
     pub rfq_payload_sha256: Option<String>,
     pub policy_sha256: String,
+    /// Prepared-action digest; historical field name retained for report compatibility.
     pub confirmation_id: Option<String>,
     pub max_age_seconds: u64,
     pub created_at: String,
@@ -140,20 +141,20 @@ impl PreparedTrade {
         self.transaction.is_some() && self.report.blockers.is_empty()
     }
     /// Binding includes wallet, exact transaction, quote, simulation and policy.
-    /// The caller must obtain this exact identifier through an operator interface.
-    pub fn authorize(self, confirmation_id: &str) -> Result<SignerRequest> {
+    /// Consumes fresh preparation directly; no user-entered confirmation is needed.
+    pub fn into_signer_request(self) -> Result<SignerRequest> {
         ensure!(self.ready(), "trade has not passed preparation gates");
-        ensure!(
-            self.report.confirmation_id.as_deref() == Some(confirmation_id),
-            "confirmation does not match the prepared action"
-        );
+        let binding = self
+            .report
+            .confirmation_id
+            .context("missing prepared action binding")?;
         ensure!(
             self.started.elapsed() < Duration::from_secs(self.report.max_age_seconds),
             "prepared action expired; prepare again"
         );
         Ok(SignerRequest {
             protocol: "flow-bnb-signer-v1".into(),
-            confirmation_id: confirmation_id.into(),
+            confirmation_id: binding,
             chain_id: 56,
             kind: self.report.transaction.as_ref().unwrap().kind.clone(),
             transaction: self.transaction.unwrap(),
@@ -167,6 +168,7 @@ impl PreparedTrade {
 #[serde(deny_unknown_fields)]
 pub struct SignerRequest {
     pub protocol: String,
+    /// Action binding in signer-v1; this is not evidence of human confirmation.
     pub confirmation_id: String,
     pub chain_id: u64,
     pub kind: String,
@@ -176,6 +178,7 @@ pub struct SignerRequest {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignerResponse {
+    /// Action binding in signer-v1; this is not evidence of human confirmation.
     pub confirmation_id: String,
     pub tx_hash: String,
 }
@@ -437,8 +440,8 @@ async fn prepare<T: HttpTransport + Clone + 'static>(
         "invalid notional limit"
     );
     ensure!(
-        policy.risk.require_operator_confirmation && policy.risk.require_successful_simulation,
-        "execution cannot disable simulation or confirmation"
+        policy.risk.require_successful_simulation,
+        "execution requires simulation"
     );
     ensure!(
         (1..=30).contains(&policy.max_age_seconds),
@@ -534,7 +537,6 @@ async fn prepare<T: HttpTransport + Clone + 'static>(
         price_impact_bps: evidence.price_impact_bps,
         mode: ExecutionMode::Prepare,
         simulation_status: None,
-        operator_confirmed: false,
     };
     report.quote = Some(evidence.clone());
     let result = policy.risk.evaluate(&intent);
@@ -620,8 +622,8 @@ async fn prepare<T: HttpTransport + Clone + 'static>(
             .push("swap router is not in local allowlist".into());
     }
     report.transaction = Some(summary("swap", &tx, None, None)?);
-    // Require a separately confirmed exact-amount approval first. Re-run to obtain
-    // a fresh quote after confirmation. Do not simulate a swap with missing allowance.
+    // Submit an exact-amount allowance transaction first. Re-run to obtain
+    // a fresh quote after it settles. Do not simulate a swap with missing allowance.
     if let Some(spender) = quote.get("approveTarget").and_then(Value::as_str) {
         let approval = prepare_approval(runner, report, policy, &evidence.vendor, spender).await?;
         report.state = if report.blockers.is_empty() {
@@ -640,14 +642,8 @@ async fn prepare<T: HttpTransport + Clone + 'static>(
     ensure!(simulation == "SUCCESS", "transaction simulation failed");
     intent.mode = ExecutionMode::Execute;
     intent.simulation_status = Some(SimulationStatus::Success);
-    // Operator confirmation is still pending; it is enforced by authorize(), not
-    // supplied by the model. Evaluate the other gates without bypassing that gate.
-    let evaluation = policy.risk.evaluate(&intent);
     ensure!(
-        evaluation
-            .violations
-            .iter()
-            .all(|v| v.code == "confirmation_required"),
+        policy.risk.evaluate(&intent).allowed,
         "execution policy rejected transaction"
     );
     report.transaction = Some(summary("swap", &tx, None, None)?);
@@ -951,6 +947,7 @@ fn hash(bytes: &[u8]) -> String {
 #[derive(Serialize)]
 pub struct SettlementReport {
     pub schema_version: u32,
+    /// Action binding in signer-v1; this is not evidence of human confirmation.
     pub confirmation_id: String,
     pub tx_hash: String,
     pub state: String,

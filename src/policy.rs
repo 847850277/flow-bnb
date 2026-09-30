@@ -17,8 +17,6 @@ pub struct TradePolicy {
     pub allowed_token_addresses: Vec<String>,
     #[serde(default = "default_true")]
     pub require_successful_simulation: bool,
-    #[serde(default = "default_true")]
-    pub require_operator_confirmation: bool,
 }
 
 impl Default for TradePolicy {
@@ -30,7 +28,6 @@ impl Default for TradePolicy {
             max_price_impact_bps: default_max_price_impact_bps(),
             allowed_token_addresses: Vec::new(),
             require_successful_simulation: true,
-            require_operator_confirmation: true,
         }
     }
 }
@@ -61,8 +58,6 @@ pub struct TradeIntent {
     pub mode: ExecutionMode,
     #[serde(default)]
     pub simulation_status: Option<SimulationStatus>,
-    #[serde(default)]
-    pub operator_confirmed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -173,23 +168,15 @@ impl TradePolicy {
                 }
             }
         }
-        if intent.mode == ExecutionMode::Execute {
-            if self.require_successful_simulation
-                && intent.simulation_status != Some(SimulationStatus::Success)
-            {
-                push(
-                    &mut violations,
-                    "simulation_required",
-                    "a successful simulation is required before execution",
-                );
-            }
-            if self.require_operator_confirmation && !intent.operator_confirmed {
-                push(
-                    &mut violations,
-                    "confirmation_required",
-                    "explicit operator confirmation is required before execution",
-                );
-            }
+        if intent.mode == ExecutionMode::Execute
+            && self.require_successful_simulation
+            && intent.simulation_status != Some(SimulationStatus::Success)
+        {
+            push(
+                &mut violations,
+                "simulation_required",
+                "a successful simulation is required before execution",
+            );
         }
 
         Evaluation {
@@ -262,7 +249,6 @@ mod tests {
             price_impact_bps: 40,
             mode,
             simulation_status: Some(SimulationStatus::Success),
-            operator_confirmed: true,
         }
     }
 
@@ -270,27 +256,23 @@ mod tests {
     fn prepare_mode_checks_market_risk_without_requiring_confirmation() {
         let mut intent = safe_intent(ExecutionMode::Prepare);
         intent.simulation_status = None;
-        intent.operator_confirmed = false;
         assert!(TradePolicy::default().evaluate(&intent).allowed);
     }
 
     #[test]
-    fn execution_requires_simulation_and_confirmation() {
+    fn execution_requires_simulation_without_confirmation() {
         let mut intent = safe_intent(ExecutionMode::Execute);
         intent.simulation_status = Some(SimulationStatus::Failed);
-        intent.operator_confirmed = false;
 
         let result = TradePolicy::default().evaluate(&intent);
         assert!(!result.allowed);
-        assert_eq!(result.violations.len(), 2);
+        assert_eq!(result.violations.len(), 1);
         assert!(result
             .violations
             .iter()
             .any(|violation| violation.code == "simulation_required"));
-        assert!(result
-            .violations
-            .iter()
-            .any(|violation| violation.code == "confirmation_required"));
+        intent.simulation_status = Some(SimulationStatus::Success);
+        assert!(TradePolicy::default().evaluate(&intent).allowed);
     }
 
     #[test]

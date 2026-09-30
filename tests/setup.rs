@@ -106,7 +106,7 @@ fn fresh_install_login_repeat_and_doctor_preserve_state() {
     succeeds(&f.run(&["setup", "--no-open"], &[]));
     let doctor = f.run(&["doctor"], &[]);
     succeeds(&doctor);
-    assert!(String::from_utf8_lossy(&doctor.stderr).contains("1 个交易提交锁"));
+    assert!(!String::from_utf8_lossy(&doctor.stderr).contains("交易提交锁"));
     assert_eq!(before, fs::read(f.config()).unwrap());
     assert_eq!(fs::read(lock).unwrap(), b"unresolved-order");
     assert_eq!(f.calls().lines().filter(|l| *l == "install").count(), 1);
@@ -311,9 +311,21 @@ fn mcp_pairing_returns_promptly_and_uses_bound_root_without_trading() {
                 "tools/call",
                 json!({"name":"connect_bnb_wallet","arguments":{}}),
             );
-            assert_eq!(repeat["structuredContent"]["phase"], "awaiting_wallet");
+            // Pairing may finish between these calls. A repeated connect then
+            // rechecks the already-connected wallet and reports preparing.
+            assert!(
+                matches!(
+                    repeat["structuredContent"]["phase"].as_str(),
+                    Some("awaiting_wallet" | "preparing")
+                ),
+                "{repeat}"
+            );
         }
         if state["connected"] == true {
+            assert_eq!(state["execution_mode"], "direct");
+            assert_eq!(state["confirmation_required"], false);
+            assert_eq!(state["tokens"][0]["symbol"], "USDT");
+            assert_eq!(state["max_slippage_bps"], 50);
             connected = true;
             break;
         }

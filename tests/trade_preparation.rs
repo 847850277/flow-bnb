@@ -92,7 +92,7 @@ fn steps() -> Vec<(&'static str, Value)> {
     ]
 }
 #[tokio::test]
-async fn binds_real_api_results_and_requires_exact_confirmation() {
+async fn binds_prepared_transaction_without_interactive_confirmation() {
     let script = Script::new(steps());
     let prepared = prepare_with_transport(request(), policy(), script.clone()).await;
     assert!(prepared.ready(), "{:?}", prepared.report());
@@ -103,12 +103,11 @@ async fn binds_real_api_results_and_requires_exact_confirmation() {
         2
     );
     let id = prepared.report().confirmation_id.clone().unwrap();
-    let signer = prepared.authorize(&id).unwrap();
+    let signer = prepared.into_signer_request().unwrap();
+    assert_eq!(signer.confirmation_id, id);
     assert_eq!(signer.transaction["data"], "0x12345678");
     assert_eq!(signer.chain_id, 56);
     script.done();
-    let prepared = prepare_with_transport(request(), policy(), Script::new(steps())).await;
-    assert!(prepared.authorize("different-action").is_err());
 }
 #[tokio::test]
 async fn notional_uses_exact_quote_decimals_and_cannot_round_below_limit() {
@@ -130,9 +129,6 @@ async fn malformed_policy_and_request_fail_without_network() {
     let mut cases = vec![];
     let mut p = policy();
     p.risk.require_successful_simulation = false;
-    cases.push((request(), p));
-    let mut p = policy();
-    p.risk.require_operator_confirmation = false;
     cases.push((request(), p));
     let mut p = policy();
     p.risk.max_notional_usd = f64::NAN;
@@ -243,7 +239,7 @@ async fn failed_simulation_never_produces_signer_capability() {
         prepared.report().simulation_status.as_deref(),
         Some("FAILED")
     );
-    assert!(prepared.authorize("anything").is_err());
+    assert!(prepared.into_signer_request().is_err());
 }
 #[tokio::test]
 async fn rfq_is_not_misrepresented_as_simulated_or_executable() {
@@ -296,8 +292,7 @@ async fn approval_uses_quoted_vendor_and_exact_amount_then_stops() {
     let prepared = prepare_with_transport(request(), policy(), script.clone()).await;
     assert!(prepared.ready(), "{:?}", prepared.report());
     assert_eq!(prepared.report().state, "approval_ready");
-    let id = prepared.report().confirmation_id.clone().unwrap();
-    let signed = prepared.authorize(&id).unwrap();
+    let signed = prepared.into_signer_request().unwrap();
     assert_eq!(signed.kind, "approval");
     assert!(signed.expires_in_ms > 30_000 && signed.expires_in_ms <= 300_000);
     assert_eq!(signed.transaction["to"], SELL);
@@ -350,13 +345,12 @@ async fn unfunded_wallet_can_diagnose_but_cannot_authorize() {
         .any(|s| s.contains("insufficient")));
 }
 #[tokio::test]
-async fn confirmation_expires_even_when_identifier_matches() {
+async fn prepared_action_expires_before_signer_handoff() {
     let mut p = policy();
     p.max_age_seconds = 1;
     let prepared = prepare_with_transport(request(), p, Script::new(steps())).await;
-    let id = prepared.report().confirmation_id.clone().unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(1050)).await;
-    assert!(prepared.authorize(&id).is_err());
+    assert!(prepared.into_signer_request().is_err());
 }
 
 const HASH: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -417,7 +411,7 @@ async fn settlement_checks_exact_transaction_receipt_and_balance_observations() 
     let p = prepare_with_transport(request(), policy(), Script::new(steps())).await;
     let report = p.report().clone();
     let id = report.confirmation_id.clone().unwrap();
-    let request = p.authorize(&id).unwrap();
+    let request = p.into_signer_request().unwrap();
     let response = SignerResponse {
         confirmation_id: id,
         tx_hash: HASH.into(),
@@ -452,7 +446,7 @@ async fn substituted_transaction_hash_does_not_pass_settlement() {
     let p = prepare_with_transport(request(), policy(), Script::new(steps())).await;
     let report = p.report().clone();
     let id = report.confirmation_id.clone().unwrap();
-    let request = p.authorize(&id).unwrap();
+    let request = p.into_signer_request().unwrap();
     let response = SignerResponse {
         confirmation_id: id,
         tx_hash: HASH.into(),
@@ -589,7 +583,7 @@ async fn balance_fallback_wrong_chain_or_invalid_abi_cannot_become_zero() {
 }
 
 #[tokio::test]
-async fn approval_review_outlives_quote_but_respects_its_own_deadline() {
+async fn allowance_preparation_has_its_own_deadline() {
     let mut approval = approval_steps(approve_data());
     approval.push(("simulate", sim()));
     let mut p = policy();
@@ -598,13 +592,10 @@ async fn approval_review_outlives_quote_but_respects_its_own_deadline() {
     let swap = prepare_with_transport(request(), p.clone(), Script::new(steps())).await;
     p.approval_max_age_seconds = 1;
     let short = prepare_with_transport(request(), p, Script::new(approval)).await;
-    let long_id = long.report().confirmation_id.clone().unwrap();
-    let short_id = short.report().confirmation_id.clone().unwrap();
-    let swap_id = swap.report().confirmation_id.clone().unwrap();
     assert_eq!(long.report().max_age_seconds, 300);
     assert_eq!(swap.report().max_age_seconds, 1);
     tokio::time::sleep(std::time::Duration::from_millis(1050)).await;
-    assert!(long.authorize(&long_id).unwrap().expires_in_ms > 30_000);
-    assert!(short.authorize(&short_id).is_err());
-    assert!(swap.authorize(&swap_id).is_err());
+    assert!(long.into_signer_request().unwrap().expires_in_ms > 30_000);
+    assert!(short.into_signer_request().is_err());
+    assert!(swap.into_signer_request().is_err());
 }
