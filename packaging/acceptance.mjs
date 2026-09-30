@@ -6,6 +6,7 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { pathToFileURL } from 'node:url';
 const output = path.resolve(process.argv[2] || 'dist/release');
 const archive = fs.readdirSync(output).find(f => f.endsWith('.tgz'));
 assert.ok(archive, 'build a tarball first');
@@ -45,6 +46,9 @@ try {
   child.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
   const listed = await call('tools/list', {});
   assert.ok(listed.tools.some(t => t.name === 'execute_bnb_authorized_strategy'));
+  assert.ok(listed.tools.some(t => t.name === 'connect_bnb_wallet'));
+  const connection = await call('tools/call', { name: 'get_bnb_connection', arguments: {} });
+  assert.equal(connection.structuredContent.connected, false);
   const generated = await call('tools/call', { name: 'generate_bnb_flow', arguments: { template: 'stock_strategy' } });
   assert.notEqual(generated.isError, true, JSON.stringify(generated));
   assert.ok(fs.existsSync(path.join(env.FLOW_BNB_HOME, 'workspace/flows/stock_strategy.http.yml')));
@@ -60,6 +64,28 @@ try {
   assert.equal(Object.keys(mcp.mcpServers).length, 1);
   assert.ok(new RegExp(cli.statusMatch).test('{"connected":true}'));
   assert.ok(!new RegExp(cli.statusMatch).test('{"connected":false}'));
+  // Exercise the bundled parsers against synthetic client homes, not real clients.
+  const adapters = await import(pathToFileURL(path.join(scratch, 'npm/node_modules/@flow-bnb/desktop/clients.mjs')));
+  const definitions = adapters.server({ binary: '/test/flow-bnb', workspace: '/test/workspace', config: '/test/private.json' });
+  const fakeHome = fs.realpathSync(scratch);
+  for (const c of adapters.clients({ home: fakeHome, platform: process.platform, env: {}, project: fakeHome })) {
+    const result = adapters.commit(adapters.plan(c, definitions));
+    assert.equal(result.changed, true);
+    assert.equal(adapters.commit(adapters.plan(c, definitions)).changed, false);
+  }
+  // Universal shell entry: real tarball + real native bootstrap; only Node is prepared.
+  const shellHome = path.join(fs.realpathSync(scratch), 'shell-data');
+  const clientFile = path.join(fs.realpathSync(scratch), 'shell-client.json');
+  const shell = spawnSync('/bin/sh', [path.join(output, 'install-flow-bnb.sh'), '--client', 'cursor', '--config', clientFile, '--no-login'], {
+    env: { ...env, PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`, FLOW_BNB_HOME: shellHome }, encoding: 'utf8', timeout: 30000
+  });
+  assert.equal(shell.status, 0, shell.stderr);
+  const registered = JSON.parse(fs.readFileSync(clientFile)).mcpServers['flow-bnb'];
+  assert.ok(fs.existsSync(registered.command));
+  assert.ok(!fs.existsSync(registered.env.FLOW_BNB_AGENTIC_CONFIG));
+  assert.ok(!fs.existsSync(path.join(shellHome, 'workspace/.flow-bnb/managed/baw-1.10.0')));
+  const bundle = JSON.parse(fs.readFileSync(path.join(output, 'claude-bundle/manifest.json')));
+  assert.equal(bundle.manifest_version, '0.3'); assert.equal(bundle.server.type, 'node');
   console.log(`Packaged MCP accepted: ${listed.tools.length} tools; no Rust, wallet access, or external API required.`);
 } finally {
   if (child && child.exitCode === null) child.kill('SIGTERM');

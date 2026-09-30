@@ -12,3 +12,4 @@
 
 # Native distribution artifacts (never wallet data)
 /dist/
+/packaging/node_modules/

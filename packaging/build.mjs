@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { build } from 'esbuild';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 function option(name, fallback) { const i = args.indexOf(name); return i < 0 ? fallback : args[i + 1]; }
@@ -22,6 +23,8 @@ for (const key of platforms) {
 const dest = path.join(output, 'package');
 fs.mkdirSync(dest, { recursive: true });
 fs.cpSync(path.join(repo, 'packaging/desktop'), dest, { recursive: true, filter: p => !p.endsWith('.test.mjs') });
+// Ship a dependency-free runtime; JSONC/TOML parsers are bundled at release time.
+await build({ entryPoints: [path.join(repo, 'packaging/desktop/clients.mjs')], outfile: path.join(dest, 'clients.mjs'), bundle: true, mainFields: ['module', 'main'], platform: 'node', format: 'esm', target: 'node18', banner: { js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);' } });
 fs.copyFileSync(path.join(repo, 'LICENSE'), path.join(dest, 'LICENSE'));
 fs.mkdirSync(path.join(dest, 'flows'));
 const sha = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -76,5 +79,21 @@ json('cli.json', {
 });
 fs.copyFileSync(path.join(repo, 'packaging/workbuddy/icon.svg'), path.join(connector, 'icon.svg'));
 run('zip', ['-q', '-r', path.join(output, 'flow-bnb-workbuddy.zip'), 'flow-bnb-connector'], output);
-fs.writeFileSync(path.join(output, 'SHA256SUMS'), [archive, 'flow-bnb-workbuddy.zip'].map(f => `${sha(path.join(output, f))}  ${f}`).join('\n') + '\n');
+const digest = sha(path.join(output, archive));
+const download = local ? 'echo "Place this installer next to ' + archive + '" >&2; exit 1' : `curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 180 --output "$flow_archive" ${quote(url)}`;
+let installer = fs.readFileSync(path.join(repo, 'packaging/install.sh.in'), 'utf8');
+for (const [key, value] of Object.entries({ ARCHIVE: archive, SHA256: digest, SHORT_SHA: digest.slice(0, 12), VERSION: pkg.version, DOWNLOAD: download })) installer = installer.replaceAll(`@${key}@`, value);
+for (const name of ['install-flow-bnb.sh', 'install-flow-bnb.command']) fs.writeFileSync(path.join(output, name), installer, { mode: 0o755 });
+// Claude Desktop bundles the Node launcher and all native binaries. Pair through MCP.
+const bundle = path.join(output, 'claude-bundle');
+fs.mkdirSync(bundle); fs.cpSync(dest, path.join(bundle, 'package'), { recursive: true });
+fs.writeFileSync(path.join(bundle, 'manifest.json'), JSON.stringify({
+  manifest_version: '0.3', name: 'flow-bnb', display_name: 'Flow BNB', version: pkg.version,
+  description: 'Create auditable BNB strategies and execute within wallet authorization. Ask to connect your wallet after installation.',
+  author: { name: 'Flow BNB contributors' },
+  server: { type: 'node', entry_point: 'package/launcher.mjs', mcp_config: { command: 'node', args: ['${__dirname}/package/launcher.mjs', 'mcp'] } },
+  compatibility: { platforms: platforms.some(p => p.startsWith('darwin')) ? ['darwin'] : ['linux'], runtimes: { node: '>=22' } }
+}, null, 2) + '\n');
+run('zip', ['-q', '-r', path.join(output, 'flow-bnb.mcpb'), 'manifest.json', 'package'], bundle);
+fs.writeFileSync(path.join(output, 'SHA256SUMS'), [archive, 'flow-bnb-workbuddy.zip', 'flow-bnb.mcpb', 'install-flow-bnb.sh', 'install-flow-bnb.command'].map(f => `${sha(path.join(output, f))}  ${f}`).join('\n') + '\n');
 console.log(JSON.stringify({ output, local, archive, connector, publicationRequired: !local }, null, 2));

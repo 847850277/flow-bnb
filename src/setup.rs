@@ -5,6 +5,7 @@ use std::{
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -334,10 +335,28 @@ fn login_details(data: &Value) -> Result<(&str, &str, &str)> {
     Ok((link, code, id))
 }
 
-async fn login(baw: &Path, node: &Path, no_open: bool) -> Result<()> {
+pub type WalletProgress = Arc<Mutex<Value>>;
+
+fn progress(state: Option<&WalletProgress>, value: Value) {
+    if let Some(state) = state {
+        *state.lock().unwrap_or_else(|e| e.into_inner()) = value;
+    }
+}
+
+async fn login(
+    baw: &Path,
+    node: &Path,
+    no_open: bool,
+    state: Option<&WalletProgress>,
+) -> Result<()> {
     let data = wallet(baw, node, &["auth", "signin"], 30).await?;
     if data["status"] != "ALREADY_CONNECTED" {
         let (link, code, id) = login_details(&data)?;
+        progress(
+            state,
+            json!({"phase":"awaiting_wallet", "login_url":link, "pairing_code":code,
+            "message":"请打开币安官方链接，在手机核对配对码；完成后调用 get_bnb_connection。配对最长等待 5 分钟。"}),
+        );
         eprintln!("\n请在币安 App 中核对配对码：{code}\n登录链接： {link} \n等待手机确认，最长 5 分钟；请保持连接窗口开启…");
         if !no_open {
             if let Some(opener) = executable(if cfg!(target_os = "macos") {
@@ -388,8 +407,36 @@ pub fn config_path(root: &Path) -> PathBuf {
         .unwrap_or_else(|| root.join(".flow-bnb/agentic.json"))
 }
 
+/// Prepare Node only. The desktop bootstrap uses this before any wallet access.
+pub async fn prepare_runtime(config: &Path) -> Result<PathBuf> {
+    let parent = config.parent().context("missing configuration directory")?;
+    private_dir(parent)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(parent.join("setup.lock"))?;
+    lock.try_lock()
+        .context("另一个 setup 正在运行；请等待它完成")?;
+    let home = parent.join("managed");
+    private_dir(&home)?;
+    runtime(&home).await
+}
+
 pub async fn setup(config: &Path, no_login: bool, no_open: bool) -> Result<()> {
-    let root = fs::canonicalize(env::current_dir()?)?;
+    setup_for_root(&env::current_dir()?, config, no_login, no_open, None).await
+}
+
+pub async fn setup_for_root(
+    root: &Path,
+    config: &Path,
+    no_login: bool,
+    no_open: bool,
+    state: Option<&WalletProgress>,
+) -> Result<()> {
+    let root = fs::canonicalize(root)?;
     let config = if config.is_absolute() {
         config.to_owned()
     } else {
@@ -433,7 +480,7 @@ pub async fn setup(config: &Path, no_login: bool, no_open: bool) -> Result<()> {
             eprintln!("依赖已准备好。尚未登录；运行 flow-bnb setup 完成手机配对。");
             return Ok(());
         }
-        login(&baw, &node, no_open).await?;
+        login(&baw, &node, no_open, state).await?;
     }
     let address = bsc_address(&wallet(&baw, &node, &["wallet", "address"], 30).await?)?;
     if let Some(c) = &existing {

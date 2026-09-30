@@ -33,9 +33,4 @@ Important observations from 2026-09-23:
 These are machine observations to help the participant reproduce findings. They
 are not the required human-authored Developer Experience Report.
 
-## Offline MCP handoff evidence
 
-`mcp-handoff-simulation.json` comes from `scripts/demo_handoff.py --self-test`.
-It exercises real MCP/CLI/wallet-adapter processes with fixture API/RPC responses.
-It is explicitly SIMULATION_ONLY, contains no mainnet transaction, and is not an LLM
-session or EVM execution proof. The fixed transaction hash belongs to the fixture.

@@ -8,13 +8,35 @@
 - `src/`：Flow 适配器、交易规则、持久化请求队列和 MCP 工具。
 - `examples/`：钱包配置及交易请求样例。
 
-## WorkBuddy 安装入口
+## 客户端安装
 
-已提供 WorkBuddy 5.0+ 的本地 MCP 连接器打包方案：**安装连接器 → 自动准备 Flow 和钱包依赖 → 币安 App 确认登录 → 返回对话使用**。Flow 引擎和 MCP 在同一份预编译程序内；用户不需要 Rust、手动编译或单独安装 `baw`。连接器用 WorkBuddy 托管的 Node 22 启动，钱包配对由官方登录页完成，不自动授权交易。
+安装器把 **Flow、MCP 和钱包依赖**作为一个入口交付，无需 Rust、手写 MCP 路径或单独安装 `baw`。支持以下接入方式：
 
-目前已完成本机 macOS arm64 安装包与真实 MCP 协议验收；**尚未发布公开下载地址，也未在 WorkBuddy 界面完成验收**。发布流程会生成 `flow-bnb-workbuddy.zip` 连接器和包含四个平台原生程序的 npm 安装包。发布后连接器按固定版本自动获取安装包。制作和验收步骤见 [安装包说明](packaging/README.md)。
+| 客户端 | 安装方式 |
+| --- | --- |
+| WorkBuddy 5.0+ | 导入 `flow-bnb-workbuddy.zip`，自动准备依赖并登录 |
+| Claude Desktop（macOS） | 导入 `flow-bnb.mcpb`；也支持通用安装器 |
+| Codex、Claude Code、Cursor、VS Code / Copilot、Copilot CLI | 安装器选择客户端，自动合并配置 |
+| Windsurf（旧配置路径）、Devin Desktop、Cline CLI、Gemini CLI、Kiro、Qoder CLI、OpenCode | 同一安装器自动合并配置 |
+| Roo Code、Continue | 同一安装器，指定项目目录 |
+| Cline IDE | 在其 MCP 设置中取得配置路径，用 `--client cline --config <路径>` 安装 |
+| Trae、Cherry Studio、其他支持本地 stdio 的客户端 | 导入生成的通用配置，或在 MCP 设置中填写生成的命令、参数、环境变量 |
 
-安装后的数据默认保存在 `~/.local/share/flow-bnb/`，独立于 npm 缓存；升级不覆盖策略、钱包限额或未决订单。连接器自动检查登录状态，断开时调用官方登出，重连不清除交易记录。已有源码工作区配置不会被自动迁移。支持 macOS arm64/x64、Linux glibc x64/arm64；尚不支持 Windows。
+从 Release 下载 `install-flow-bnb.sh`，运行后选择客户端即可；macOS 也提供 `.command` 文件。没有可用 Node/npm 时会自动准备私有运行环境。命令行可直接选择多个客户端：
+
+```sh
+sh install-flow-bnb.sh --client codex,cursor,vscode
+# 项目型客户端
+sh install-flow-bnb.sh --client roo,continue --project /绝对路径/项目
+# 其他客户端：生成可导入配置
+sh install-flow-bnb.sh --client generic
+```
+
+首次按提示在币安 App 完成钱包配对，随后重启客户端、启用 MCP。也可以加 `--no-login` 先安装，再在对话中说“连接 Flow BNB 钱包”；Agent 使用 `connect_bnb_wallet` / `get_bnb_connection` 展示官方链接、配对码及进度。登录不创建交易授权，客户端自身的工具审批设置保持原样。
+
+配置合并会保留其他 MCP、用户设置和注释，并备份原文件；重复安装不会重复添加。升级只更新安装器记录且未被用户改动的 Flow 条目，遇到同名冲突会停止。所有客户端默认共用 `~/.local/share/flow-bnb/` 中的钱包配置、策略和交易记录；已有源码工作区不会被自动迁移。
+
+**当前完成了配置适配测试和本机 macOS arm64 安装包/MCP 自动验收，尚未发布公开 Release，也未完成各客户端界面的逐一验收。** 上面的下载命令用于发布后的安装包。支持 macOS arm64/x64、Linux glibc x64/arm64；尚不支持 Windows 原生、Alpine 或只接受远程 HTTP/SSE 的客户端。构建本地预览和完整兼容性说明见 [安装包说明](packaging/README.md)。
 
 ## 源码开发与本地运行
 
@@ -52,6 +74,7 @@ cargo run --locked -- agentic-operator --watch
 
 | MCP 工具 | 用途 |
 | --- | --- |
+| `connect_bnb_wallet` / `get_bnb_connection` | 准备依赖、官方钱包配对及只读状态查询 |
 | `prepare_agentic_trade` | 只读检查与报价 |
 | `request_agentic_execution` | 交易排队；接收 `request_id` 和 `intent`，重试同一请求必须复用相同 ID 与参数 |
 | `get_agentic_execution` | 用返回的 `intent_id` 查询执行结果 |
@@ -59,7 +82,7 @@ cargo run --locked -- agentic-operator --watch
 | `refresh_agentic_execution` | 恢复已有订单的只读核对 |
 | `inspect_agentic_order` | 核对其他入口已提交的订单 |
 
-上述手动模式在操作员终端逐笔确认；预授权自动模式见下文。MCP 排队不等于授权。源码方式使用上述本地配置；连接器安装包已可构建，公开发布与 WorkBuddy 实际客户端验收待完成。
+上述手动模式在操作员终端逐笔确认；预授权自动模式见下文。MCP 排队不等于授权。源码方式使用上述本地配置；连接器安装包已可构建，公开发布与各客户端界面验收待完成。
 
 ## 自定义策略
 
@@ -76,7 +99,11 @@ cargo run --locked -- strategy-run flows/stock_strategy.http.yml \
 # 显式加 --enqueue <稳定请求ID> 才会在条件成立时排队，仍需操作员确认
 ```
 
-策略使用标准 Flow YAML。内置本地端点 `https://flow-bnb.invalid/strategy/quote` 接收交易意图、返回原生报价；`compare` 接收十进制字符串 `left` / `right` 和 `operator`（eq/gt/gte/lt/lte）；`decision` 接收 `triggered` 和 `intent`。这些 POST 由本地适配器处理。也允许官方 Web3 的 RWA 平台、搜索、价格和钱包余额 GET 查询，相关步骤需要 API Key。其他网络地址、文件请求体、认证注入及直接下单操作会被拒绝。
+股票场景使用 `generate_bnb_flow(template="stock_spread_strategy")`：读取 AAPLon 的链上价和 API 参考价，计算 `(链上价 - 参考价) / 参考价 × 10000`，默认低于参考价至少 100 bp（1%）时产生 6 USDT 的候选买入意图。正值表示高于参考价，负值表示低于参考价；参数支持改为溢价条件及卖出意图。计算使用精确十进制，缺价、零价、过期价格及代币不匹配均停止求值。此场景需要 Web3 API 凭据，执行前复查沿用同一冻结策略。
+
+官方 `referencePrice` 是由链上价格换算的每股参考价，因此该指标表示 API 字段间偏离；独立标的市场的真实折溢价还需要外部行情与份额换算。输出标明参考价口径，更新时间检查仅针对 `tokenPriceUpdatedAt`。完整的只读命令、边界说明和 WorkBuddy 演示提示见 [股票参考价偏离监控](docs/stock-spread-demo.md)。
+
+策略使用标准 Flow YAML。内置本地端点 `https://flow-bnb.invalid/strategy/quote` 接收交易意图、返回原生报价；`compare` 接收十进制字符串 `left` / `right` 和 `operator`（eq/gt/gte/lt/lte）；`rwa-spread` 接收 RWA 价格数组、监控代币、交易意图、比较符、带符号的 bp 阈值和最大价格年龄；`decision` 接收 `triggered` 和 `intent`。这些 POST 由本地适配器处理。也允许官方 Web3 的 RWA 平台、搜索、价格和钱包余额 GET 查询，相关步骤需要 API Key。其他网络地址、文件请求体、认证注入及直接下单操作会被拒绝。
 
 每次最多 30 秒、32 次请求、一个交易决策；YAML 上限 64 KiB、输入上限 16 KiB。试运行使用实时只读数据，不是历史回测，也不会启动常驻监控或定时任务。
 

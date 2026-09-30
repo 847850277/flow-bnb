@@ -52,6 +52,7 @@ case "$1 $2" in
  printf '{"success":true,"data":{}}\n' ;;
 'auth signin') printf '{"success":true,"data":{"urlForWeb":"https://web3.binance.com/en/agent-login?test=1","pairingCode":"001234","qrCodeId":"test-only"}}\n' ;;
 'auth verify')
+ if [ "$FLOW_SETUP_DELAY_VERIFY" = '1' ]; then /bin/sleep 1; fi
  : > "$FLOW_SETUP_TEST_HOME/connected"
  printf '{"success":true,"data":{"status":"SUCCESS"}}\n' ;;
 *) exit 89 ;;
@@ -210,5 +211,122 @@ fn connector_status_logout_and_relogin_preserve_policy_and_order_locks() {
     assert!(f.run(&["connection-status"], &[]).status.success());
     assert_eq!(before, fs::read(f.config()).unwrap());
     assert_eq!(fs::read_to_string(lock).unwrap(), "pending");
+    assert!(!f.calls().contains("market-order"));
+}
+
+#[test]
+fn runtime_bootstrap_does_not_install_wallet_or_login() {
+    let f = Fixture::new();
+    let o = f.run(&["prepare-runtime"], &[]);
+    assert!(o.status.success());
+    assert!(String::from_utf8_lossy(&o.stdout)
+        .trim()
+        .ends_with("/bin/node"));
+    assert!(!f.config().exists());
+    assert!(!f.dir.path().join("calls").exists());
+}
+
+#[test]
+fn mcp_pairing_returns_promptly_and_uses_bound_root_without_trading() {
+    use serde_json::json;
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    use std::{sync::mpsc, thread, time::Duration};
+    let f = Fixture::new();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_flow-bnb"))
+        .args(["mcp", "--root"])
+        .arg(f.dir.path())
+        .env_remove("FLOW_BNB_AGENTIC_CONFIG")
+        .env("PATH", f.dir.path().join("bin"))
+        .env("FLOW_SETUP_TEST_HOME", f.dir.path())
+        .env("FLOW_SETUP_DELAY_VERIFY", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let output = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if tx
+                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let mut sequence = 0;
+    let mut call = |method: &str, params: Value| {
+        sequence += 1;
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":sequence,"method":method,"params":params})
+        )
+        .unwrap();
+        input.flush().unwrap();
+        loop {
+            let v = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            if v["id"] == sequence {
+                assert!(v.get("error").is_none(), "{v}");
+                return v["result"].clone();
+            }
+        }
+    };
+    call(
+        "initialize",
+        json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"pairing-test","version":"1"}}),
+    );
+    // rmcp accepts tool calls after initialization response.
+    let before = call(
+        "tools/call",
+        json!({"name":"get_bnb_connection","arguments":{}}),
+    );
+    assert_eq!(before["structuredContent"]["connected"], false);
+    assert!(!f.config().exists());
+    let start = call(
+        "tools/call",
+        json!({"name":"connect_bnb_wallet","arguments":{}}),
+    );
+    assert_eq!(start["structuredContent"]["phase"], "preparing");
+    let mut saw_pairing = false;
+    let mut connected = false;
+    for _ in 0..100 {
+        let result = call(
+            "tools/call",
+            json!({"name":"get_bnb_connection","arguments":{}}),
+        );
+        let state = &result["structuredContent"];
+        if state["phase"] == "awaiting_wallet" {
+            saw_pairing = true;
+            assert_eq!(state["pairing_code"], "001234");
+            assert!(state["login_url"]
+                .as_str()
+                .unwrap()
+                .starts_with("https://web3.binance.com/"));
+            let repeat = call(
+                "tools/call",
+                json!({"name":"connect_bnb_wallet","arguments":{}}),
+            );
+            assert_eq!(repeat["structuredContent"]["phase"], "awaiting_wallet");
+        }
+        if state["connected"] == true {
+            connected = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(saw_pairing && connected);
+    let c: Value = serde_json::from_slice(&fs::read(f.config()).unwrap()).unwrap();
+    assert!(c["state_dir"]
+        .as_str()
+        .unwrap()
+        .starts_with(f.dir.path().canonicalize().unwrap().to_str().unwrap()));
+    assert_eq!(f.calls().lines().filter(|l| *l == "auth signin").count(), 1);
     assert!(!f.calls().contains("market-order"));
 }

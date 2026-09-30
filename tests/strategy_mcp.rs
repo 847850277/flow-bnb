@@ -116,6 +116,34 @@ fn calls(root: &Path) -> usize {
 }
 
 #[test]
+fn stock_spread_template_is_discoverable_and_can_be_reviewed_and_saved() {
+    let d = fixture();
+    let mut m = Mcp::start(d.path());
+    let capabilities = m.tool("list_bnb_capabilities", json!({}));
+    assert!(capabilities["templates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["id"] == "stock_spread_strategy"));
+    let generated = m.tool(
+        "generate_bnb_flow",
+        json!({"template":"stock_spread_strategy"}),
+    );
+    let yaml = generated["canonical_yaml"].as_str().unwrap();
+    let validation = m.tool("validate_bnb_flow", json!({"yaml":yaml}));
+    assert_eq!(validation["valid"], true);
+    assert!(validation["strategy_validation_error"].is_null());
+    m.tool(
+        "save_bnb_flow",
+        json!({"path":"strategies/spread.http.yml","yaml":yaml}),
+    );
+    let saved = fs::read_to_string(d.path().join("strategies/spread.http.yml")).unwrap();
+    assert!(saved.contains("rwa-spread"));
+    assert!(saved.contains("threshold_bps"));
+    assert_eq!(calls(d.path()), 0);
+}
+
+#[test]
 fn authored_yaml_round_trip_preview_queue_retry_cancel_and_frozen_snapshot() {
     let d = fixture();
     let mut m = Mcp::start(d.path());

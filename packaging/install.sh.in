@@ -1,0 +1,50 @@
+#!/bin/sh
+# Generated release installer. No Rust, global npm install or sudo required.
+set -eu
+umask 077
+flow_home=${FLOW_BNB_HOME:-"$HOME/.local/share/flow-bnb"}
+case "$flow_home" in /*) ;; *) echo 'FLOW_BNB_HOME must be absolute' >&2; exit 1;; esac
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) flow_platform=darwin-arm64;; Darwin-x86_64) flow_platform=darwin-x64;;
+  Linux-aarch64|Linux-arm64) flow_platform=linux-arm64;; Linux-x86_64) flow_platform=linux-x64;;
+  *) echo 'Flow BNB currently supports macOS/Linux arm64/x64 (not native Windows).' >&2; exit 1;;
+esac
+# Reject redirected installation paths, including parent directories.
+flow_check=$flow_home
+while [ "$flow_check" != / ]; do
+  if [ -L "$flow_check" ]; then echo "Installation path must not contain symlinks: $flow_check" >&2; exit 1; fi
+  flow_check=$(dirname "$flow_check")
+done
+mkdir -p "$flow_home" "$flow_home/packages" "$flow_home/workspace"
+flow_stage=$(mktemp -d "$flow_home/.download.XXXXXX")
+trap 'rm -rf "$flow_stage"' EXIT HUP INT TERM
+flow_archive="$flow_stage/package.tgz"
+flow_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$flow_script_dir/@ARCHIVE@" ]; then
+  cp "$flow_script_dir/@ARCHIVE@" "$flow_archive"
+else
+  @DOWNLOAD@
+fi
+if command -v shasum >/dev/null 2>&1; then
+  flow_hash=$(shasum -a 256 "$flow_archive" | cut -d ' ' -f 1)
+else
+  flow_hash=$(sha256sum "$flow_archive" | cut -d ' ' -f 1)
+fi
+if [ "$flow_hash" != '@SHA256@' ]; then echo 'Download checksum mismatch; nothing executed.' >&2; exit 1; fi
+tar -xzf "$flow_archive" -C "$flow_stage"
+flow_binary="$flow_stage/package/native/$flow_platform/flow-bnb"
+if [ ! -f "$flow_binary" ]; then echo "This preview does not include $flow_platform" >&2; exit 1; fi
+chmod 700 "$flow_binary"
+# Only Node is prepared here; wallet pairing starts after client selection.
+flow_node=$("$flow_binary" prepare-runtime --config "$flow_home/workspace/.flow-bnb/agentic.json")
+# Keep the verified package at a durable path, outside npm caches.
+flow_package="$flow_home/packages/@VERSION@-@SHORT_SHA@"
+if [ -e "$flow_package" ]; then
+  if [ -L "$flow_package" ] || ! diff -qr "$flow_stage/package" "$flow_package" >/dev/null; then
+    echo 'Existing package differs; preserved. Inspect installation before retrying.' >&2; exit 1
+  fi
+else
+  mv "$flow_stage/package" "$flow_package"
+fi
+export FLOW_BNB_HOME="$flow_home"
+"$flow_node" "$flow_package/launcher.mjs" onboard "$@"

@@ -28,6 +28,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Prepare the private Node runtime for the desktop installer, without wallet access.
+    PrepareRuntime {
+        #[arg(
+            long,
+            default_value = ".flow-bnb/agentic.json",
+            env = "FLOW_BNB_AGENTIC_CONFIG"
+        )]
+        config: PathBuf,
+    },
     /// Read-only connection check for desktop connector onboarding (JSON).
     ConnectionStatus {
         #[arg(
@@ -311,6 +320,13 @@ async fn main() -> Result<()> {
             .map_err(|_| anyhow::anyhow!("could not initialize verbose logging"))?;
     }
     match cli.command {
+        Command::PrepareRuntime { config } => {
+            println!(
+                "{}",
+                flow_bnb::setup::prepare_runtime(&config).await?.display()
+            );
+            Ok(())
+        }
         Command::ConnectionStatus { config } => {
             let result = flow_bnb::setup::connection_status(&config).await;
             match result {

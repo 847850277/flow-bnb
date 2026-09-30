@@ -1,13 +1,31 @@
 {
   "name": "@flow-bnb/desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Flow BNB desktop MCP launcher with bundled native binaries",
   "type": "module",
-  "bin": { "flow-bnb-desktop": "launcher.mjs" },
-  "engines": { "node": ">=22" },
-  "os": ["darwin", "linux"],
-  "cpu": ["arm64", "x64"],
-  "files": ["launcher.mjs", "native", "manifest.json", "flows", "LICENSE"],
+  "bin": {
+    "flow-bnb-desktop": "launcher.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
+  "files": [
+    "launcher.mjs",
+    "native",
+    "manifest.json",
+    "flows",
+    "LICENSE",
+    "clients.mjs",
+    "onboard.mjs"
+  ],
   "license": "MIT",
   "repository": "https://github.com/847850277/flow-bnb"
 }

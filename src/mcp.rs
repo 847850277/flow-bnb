@@ -30,6 +30,7 @@ const SAFE_SWAP_PREPARATION: &str = include_str!("../flows/safe_swap_preparation
 #[derive(Clone)]
 pub struct FlowBnbMcpServer {
     root: Arc<PathBuf>,
+    connection: crate::setup::WalletProgress,
 }
 
 impl FlowBnbMcpServer {
@@ -45,12 +46,14 @@ impl FlowBnbMcpServer {
         }
         Ok(Self {
             root: Arc::new(root),
+            connection: Arc::new(std::sync::Mutex::new(serde_json::json!({"phase":"idle"}))),
         })
     }
 
     fn template_source(template: FlowTemplate) -> &'static str {
         match template {
             FlowTemplate::StockStrategy => crate::strategy::TEMPLATE,
+            FlowTemplate::StockSpreadStrategy => crate::strategy::SPREAD_TEMPLATE,
             FlowTemplate::RwaDiscovery => RWA_DISCOVERY,
             FlowTemplate::WalletSnapshot => WALLET_SNAPSHOT,
             FlowTemplate::SafeSwapPreparation => SAFE_SWAP_PREPARATION,
@@ -207,6 +210,61 @@ impl FlowBnbMcpServer {
 #[tool_router]
 impl FlowBnbMcpServer {
     #[tool(
+        description = "Read wallet connection and pending login progress. Does not install, sign in or trade. During pairing poll every 3–5 seconds and show the official login_url and pairing_code to the user."
+    )]
+    pub async fn get_bnb_connection(&self) -> Result<Json<Value>, String> {
+        let state = self
+            .connection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if matches!(
+            state["phase"].as_str(),
+            Some("preparing" | "awaiting_wallet" | "failed")
+        ) {
+            return Ok(Json(state));
+        }
+        let config = crate::setup::config_path(&self.root);
+        Ok(Json(match crate::setup::connection_status(&config).await {
+            Ok(address) => {
+                serde_json::json!({"phase":"connected","connected":true,"wallet_address":address})
+            }
+            Err(_) => {
+                serde_json::json!({"phase":"disconnected","connected":false,"message":"Ask the user to connect the wallet with connect_bnb_wallet. This does not authorize trading."})
+            }
+        }))
+    }
+
+    #[tool(
+        description = "On explicit user request to connect/reconnect their wallet, prepare managed dependencies and start official Binance Agentic Wallet pairing. Returns immediately; poll get_bnb_connection for login URL/code and completion. No private keys, trade, or trading mandate. Does not open a browser automatically."
+    )]
+    pub async fn connect_bnb_wallet(&self) -> Result<Json<Value>, String> {
+        let mut state = self.connection.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(
+            state["phase"].as_str(),
+            Some("preparing" | "awaiting_wallet")
+        ) {
+            return Ok(Json(state.clone()));
+        }
+        *state = serde_json::json!({"phase":"preparing", "message":"正在准备依赖；请调用 get_bnb_connection 查看登录链接与进度。"});
+        let response = state.clone();
+        let progress = self.connection.clone();
+        let root = self.root.clone();
+        let config = crate::setup::config_path(&root);
+        tokio::spawn(async move {
+            let result =
+                crate::setup::setup_for_root(&root, &config, false, true, Some(&progress)).await;
+            *progress.lock().unwrap_or_else(|e| e.into_inner()) = match result {
+                Ok(()) => serde_json::json!({"phase":"ready"}),
+                Err(e) => {
+                    serde_json::json!({"phase":"failed", "message":format!("{e:#}"), "retry_tool":"connect_bnb_wallet"})
+                }
+            };
+        });
+        Ok(Json(response))
+    }
+
+    #[tool(
         name = "get_bnb_strategy_authorization",
         description = "Inspect one operator-created automatic trading authorization, or list them when authorization_id is omitted. Shows frozen strategy, exact order intent, cumulative budget, expiry, cooldown and blockers. Cannot create or increase authorization.",
         annotations(
@@ -359,7 +417,7 @@ impl FlowBnbMcpServer {
 
     #[tool(
         name = "run_bnb_strategy",
-        description = "Read-only evaluation of saved USER-AUTHORED Flow YAML with inputs. Runs bounded conditions/loops, native quotes and allowlisted Web3 GETs; returns outputs, steps and candidate trade decision. Never queues, signs or submits. Real quotes, not a historical backtest. Maximum 30s/32 requests. Use stock_strategy template for schema.",
+        description = "Read-only evaluation of saved USER-AUTHORED Flow YAML with inputs. Runs bounded conditions/loops, native quotes and allowlisted Web3 GETs; returns outputs, steps and candidate trade decision. Never queues, signs or submits. Live data, not a historical backtest. Maximum 30s/32 requests. Use stock_strategy for minimum receive or stock_spread_strategy for signed RWA token/reference price deviation.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -534,6 +592,7 @@ impl FlowBnbMcpServer {
             network: "BNB Smart Chain mainnet".to_owned(),
             templates: vec![
                 TemplateInfo::new(FlowTemplate::StockStrategy, "Editable native quote -> exact minimum receive threshold -> trade decision. Run with run_bnb_strategy; queue with request_bnb_strategy_execution. No Web3 key needed."),
+                TemplateInfo::new(FlowTemplate::StockSpreadStrategy, "RWA token price vs API reference price -> exact signed basis-point threshold -> candidate intent. Validates token identity and token-price age. Requires Web3 credentials. The reference is token-derived per-share data, not an independent equity quote. Read-only preview via run_bnb_strategy."),
                 TemplateInfo::new(FlowTemplate::AgenticStage, "Native wallet checks, quotes and operator-only order submission through a local process adapter; requires agentic-trade, not generic HTTP run."),
                 TemplateInfo::new(FlowTemplate::AgenticOrder, "Bounded native order polling through the local adapter; use agentic-track or inspect_agentic_order."),
                 TemplateInfo::new(FlowTemplate::TransactionReceipt, "Track an existing transaction via read-only JSON-RPC with bounded polling and confirmation checks; requires the flow-bnb receipt adapter."),
@@ -559,7 +618,8 @@ impl FlowBnbMcpServer {
                 "/api/v1/dex/pre-transaction/simulate".to_owned(),
             ],
             safety_boundary: vec![
-                "User strategy profile: 64 KiB YAML, 16 KiB inputs, 30 seconds, 32 requests, at most one decision. Local POST https://flow-bnb.invalid/strategy/{quote,compare,decision}; only official Web3 RWA platforms/search/price and wallet balances GETs. File bodies, custom auth, arbitrary network destinations and direct signing/submission are blocked. compare accepts nonnegative decimal strings and eq/gt/gte/lt/lte. decision accepts {triggered:boolean,intent:AgenticIntent}. Native quote accepts AgenticIntent and returns data.toCoinAmount. Conditional steps and bounded loops use standard Flow YAML. Runtime checks every rendered URL.".to_owned(),
+                "User strategy profile: 64 KiB YAML, 16 KiB inputs, 30 seconds, 32 requests, at most one decision. Local POST https://flow-bnb.invalid/strategy/{quote,compare,rwa-spread,decision}; only official Web3 RWA platforms/search/price and wallet balances GETs. File bodies, custom auth, arbitrary network destinations and direct signing/submission are blocked. compare accepts nonnegative decimal strings and eq/gt/gte/lt/lte. decision accepts {triggered:boolean,intent:AgenticIntent}. Native quote accepts AgenticIntent and returns data.toCoinAmount. Conditional steps and bounded loops use standard Flow YAML. Runtime checks every rendered URL.".to_owned(),
+                "rwa-spread accepts {prices: RWA price data array, stock_token, intent, operator: eq/gt/gte/lt/lte, threshold_bps: signed integer, max_age_seconds: 1..86400}. Exactly one BSC row must match the monitored token and a token in the intent. Positive bps is above reference, negative below. Uses exact arithmetic; displayed bps/percent are truncated to six decimal places. Rejects missing, zero, malformed, stale or future-dated prices. referencePrice is token-derived per-share data; its independent timestamp is unavailable. This is an API-field deviation, not a claim of equity-market arbitrage.".to_owned(),
                 "MCP tools never accept Binance API credentials or wallet private keys; receipt reports omit the provider RPC URL.".to_owned(),
                 "Manual requests queue intents for operator review. Automatic execution needs an operator-created frozen strategy mandate with exact intent, cumulative budget, order count, cooldown and expiry. Generated flows themselves never sign or broadcast.".to_owned(),
                 "Legacy Web3 execution policy requires BSC, size/slippage/impact limits, successful simulation, and explicit operator confirmation.".to_owned(),
@@ -785,7 +845,7 @@ impl ServerHandler for FlowBnbMcpServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("flow-bnb-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Automatic mode: inspect get_bnb_strategy_authorization first. When the user requests execution under an existing mandate, call execute_bnb_authorized_strategy with authorization_id and stable request_id, then poll get_bnb_authorized_execution. This can trade without CONFIRM. MCP cannot create, edit or expand mandates. Use revoke_bnb_strategy_authorization to stop future submissions. Never replace request IDs to recover unknown execution. Manual mode remains available. For user-authored strategies: generate stock_strategy as a starting point, edit YAML, validate_bnb_flow, save_bnb_flow, read_bnb_flow, then run_bnb_strategy for a read-only preview. On user request call request_bnb_strategy_execution with the reviewed source hash and stable request_id. This queues only a triggered decision; operator rechecks frozen strategy after terminal confirmation. Query/cancel/refresh with existing agentic execution tools. Never treat a dry run as approval or replace an existing ID to retry. Start with list_bnb_capabilities. Generate and validate a template, evaluate the trade policy, then build an execution plan. Never ask for private keys or API secrets. For native Agentic Wallet use prepare_agentic_trade and request_agentic_execution with a stable request_id, then get_agentic_execution to retrieve the operator result. Never generate a replacement ID to retry a submitted or unknown order. Manual requests require operator terminal confirmation; automatic submission is allowed only under an operator-created mandate. Wallet signing remains in Agentic Wallet.",
+                "Onboarding: call get_bnb_connection to check connection. On user request use connect_bnb_wallet, then poll get_bnb_connection every 3–5 seconds. Show the official login_url and pairing_code; the user confirms in Binance App. Installation/login never authorize a trade. Automatic mode: inspect get_bnb_strategy_authorization first. When the user requests execution under an existing mandate, call execute_bnb_authorized_strategy with authorization_id and stable request_id, then poll get_bnb_authorized_execution. This can trade without CONFIRM. MCP cannot create, edit or expand mandates. Use revoke_bnb_strategy_authorization to stop future submissions. Never replace request IDs to recover unknown execution. Manual mode remains available. For user-authored strategies: generate stock_strategy for native quote thresholds or stock_spread_strategy for RWA token/reference deviation (the reference is token-derived per-share data), edit YAML, validate_bnb_flow, save_bnb_flow, read_bnb_flow, then run_bnb_strategy for a read-only preview. On user request call request_bnb_strategy_execution with the reviewed source hash and stable request_id. This queues only a triggered decision; operator rechecks frozen strategy after terminal confirmation. Query/cancel/refresh with existing agentic execution tools. Never treat a dry run as approval or replace an existing ID to retry. Start with list_bnb_capabilities. Generate and validate a template, evaluate the trade policy, then build an execution plan. Never ask for private keys or API secrets. For native Agentic Wallet use prepare_agentic_trade and request_agentic_execution with a stable request_id, then get_agentic_execution to retrieve the operator result. Never generate a replacement ID to retry a submitted or unknown order. Manual requests require operator terminal confirmation; automatic submission is allowed only under an operator-created mandate. Wallet signing remains in Agentic Wallet.",
             )
     }
 }
@@ -794,6 +854,7 @@ impl ServerHandler for FlowBnbMcpServer {
 #[serde(rename_all = "snake_case")]
 pub enum FlowTemplate {
     StockStrategy,
+    StockSpreadStrategy,
     AgenticStage,
     AgenticOrder,
     RwaDiscovery,
@@ -921,6 +982,7 @@ mod tests {
     fn all_embedded_templates_compile() {
         for template in [
             FlowTemplate::StockStrategy,
+            FlowTemplate::StockSpreadStrategy,
             FlowTemplate::AgenticStage,
             FlowTemplate::AgenticOrder,
             FlowTemplate::RwaDiscovery,

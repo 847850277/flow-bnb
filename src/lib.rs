@@ -5,6 +5,7 @@ pub mod autonomy;
 pub mod mcp;
 pub mod policy;
 pub mod receipt;
+mod rwa;
 pub mod setup;
 pub mod strategy;
 pub mod trade;

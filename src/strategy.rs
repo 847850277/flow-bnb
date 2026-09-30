@@ -25,6 +25,7 @@ use std::{
 };
 
 pub const TEMPLATE: &str = include_str!("../flows/stock_strategy.http.yml");
+pub const SPREAD_TEMPLATE: &str = include_str!("../flows/stock_spread_strategy.http.yml");
 const PREFIX: &str = "https://flow-bnb.invalid/strategy/";
 const MAX_YAML: usize = 65_536;
 
@@ -320,6 +321,7 @@ fn destination(r: &Request) -> Result<&'static str> {
         return match &r.url[PREFIX.len()..] {
             "quote" => Ok("quote"),
             "compare" => Ok("compare"),
+            "rwa-spread" => Ok("rwa-spread"),
             "decision" => Ok("decision"),
             _ => bail!("unknown strategy operation; direct swap/signing is not permitted"),
         };
@@ -374,6 +376,7 @@ impl<T: HttpTransport> HttpTransport for Restricted<T> {
             let value: Value = serde_json::from_str(body)?;
             let data = match op {
                 "compare" => compare(value)?,
+                "rwa-spread" => crate::rwa::spread(&self.config, value)?,
                 "decision" => {
                     let d: Decision = serde_json::from_value(value)?;
                     self.config.rules(&d.intent)?;
@@ -558,6 +561,97 @@ mod tests {
             calls: Default::default(),
             status: 200,
         }
+    }
+    #[derive(Clone)]
+    struct RwaPrice {
+        body: Value,
+        calls: Arc<AtomicUsize>,
+    }
+    impl HttpTransport for RwaPrice {
+        async fn execute(&self, r: Request, _: RequestOptions) -> Result<HttpResponse, HttpError> {
+            assert_eq!(r.method, HttpMethod::GET);
+            assert_eq!(r.url, "https://web3.binance.com/build/api/v1/dex/market/rwa/price?binanceChainId=56&tokenContractAddresses=0x390a684ef9cade28a7ad0dfa61ab1eb3842618c4");
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(HttpResponse::new(200, vec![], self.body.to_string()))
+        }
+    }
+    fn rwa_price(price: &str) -> RwaPrice {
+        RwaPrice {
+            body: json!({"code":0,"data":[{
+                "binanceChainId":"56",
+                "tokenContractAddress":"0x390a684ef9cade28a7ad0dfa61ab1eb3842618c4",
+                "platformId":"ondo","tokenPrice":price,"referencePrice":"100",
+                "tokenPriceUpdatedAt":chrono::Utc::now().timestamp_millis(),
+            }]}),
+            calls: Default::default(),
+        }
+    }
+    #[tokio::test]
+    async fn spread_strategy_reports_signed_signal_without_wallet_or_state_writes() {
+        let (_d, c) = config();
+        let s = Snapshot::new(SPREAD_TEMPLATE, BTreeMap::new()).unwrap();
+        for (price, triggered, bps) in [("99", true, "-100"), ("100.5", false, "50")] {
+            let backend = rwa_price(price);
+            let r = run_with(&c, &s, backend.clone()).await.unwrap();
+            assert!(r.success, "{r:?}");
+            assert_eq!(r.decision.unwrap().triggered, triggered);
+            assert_eq!(r.outputs["threshold_met"], triggered);
+            assert_eq!(r.outputs["spread"]["spread_bps"], bps);
+            assert_eq!(
+                r.outputs["spread"]["reference_price_basis"],
+                "token_derived_per_share"
+            );
+            assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(fs::read_dir(&c.state_dir).unwrap().count(), 0);
+        }
+        // The same condition supports a premium-side sell with frozen inputs.
+        let s = Snapshot::new(
+            SPREAD_TEMPLATE,
+            BTreeMap::from([
+                ("operator".into(), json!("gte")),
+                ("threshold_bps".into(), json!(100)),
+                (
+                    "intent".into(),
+                    json!({
+                        "from_token":"0x390a684ef9cade28a7ad0dfa61ab1eb3842618c4",
+                        "to_token":"0x55d398326f99059fF775485246999027B3197955",
+                        "amount":"0.01","slippage_bps":50,
+                    }),
+                ),
+            ]),
+        )
+        .unwrap();
+        let r = run_with(&c, &s, rwa_price("101")).await.unwrap();
+        assert!(r.success && r.decision.as_ref().unwrap().triggered, "{r:?}");
+    }
+    #[tokio::test]
+    async fn spread_recheck_blocks_a_disappeared_signal_or_unusable_data() {
+        let (_d, c) = config();
+        let s = Snapshot::new(SPREAD_TEMPLATE, BTreeMap::new()).unwrap();
+        let initial = run_with(&c, &s, rwa_price("99")).await.unwrap();
+        let intent = initial.decision.as_ref().unwrap().intent.clone();
+        assert!(check_decision(&initial, &intent).is_ok());
+        let changed = run_with(&c, &s, rwa_price("99.000000000000000001"))
+            .await
+            .unwrap();
+        assert!(changed.success);
+        assert!(check_decision(&changed, &intent).is_err());
+        for (pointer, value) in [
+            ("/code", json!(40375)),
+            ("/data/0/referencePrice", json!("0")),
+            ("/data/0/tokenPriceUpdatedAt", json!(1)),
+            (
+                "/data/0/tokenContractAddress",
+                json!("0x1111111111111111111111111111111111111111"),
+            ),
+        ] {
+            let mut backend = rwa_price("99");
+            *backend.body.pointer_mut(pointer).unwrap() = value;
+            let failed = run_with(&c, &s, backend).await.unwrap();
+            assert!(!failed.success && failed.decision.is_none(), "{failed:?}");
+            assert!(check_decision(&failed, &intent).is_err());
+        }
+        assert_eq!(fs::read_dir(&c.state_dir).unwrap().count(), 0);
     }
     #[tokio::test]
     async fn custom_strategy_uses_exact_threshold_and_never_submits_or_queues() {

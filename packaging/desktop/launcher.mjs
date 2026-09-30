@@ -71,8 +71,8 @@ export function prepare(root = packageRoot, home = locations().home, key = platf
 export async function main(args = process.argv.slice(2)) {
   const mode = args[0] || 'mcp';
   // Status never downloads, installs, pairs a wallet, or writes configuration.
-  if (!['install', 'login', 'status', 'logout', 'mcp', 'cli'].includes(mode))
-    throw new Error('用法：flow-bnb-desktop [install|login|status|logout|mcp|cli <Flow 命令>]');
+  if (!['install', 'login', 'status', 'logout', 'mcp', 'cli', 'onboard'].includes(mode))
+    throw new Error('用法：flow-bnb-desktop [onboard --client <客户端>|install|login|status|logout|mcp|cli <Flow 命令>]');
   let paths;
   try { paths = prepare(packageRoot, locations().home, platformKey(), !['status', 'logout'].includes(mode)); }
   catch (error) {
@@ -81,6 +81,10 @@ export async function main(args = process.argv.slice(2)) {
   }
   const env = { ...process.env, FLOW_BNB_AGENTIC_CONFIG: paths.config,
     PATH: [path.dirname(process.execPath), process.env.PATH || '', '/usr/bin', '/bin'].join(path.delimiter) };
+  if (mode === 'onboard') {
+    const { onboard } = await import('./onboard.mjs');
+    return onboard(args.slice(1), paths, nativeArgs => runNative(paths, env, nativeArgs));
+  }
   let nativeArgs;
   switch (mode) {
     case 'install': nativeArgs = ['setup', '--no-login', '--no-open']; break;
@@ -89,9 +93,12 @@ export async function main(args = process.argv.slice(2)) {
     case 'logout': nativeArgs = ['disconnect']; break;
     case 'mcp': nativeArgs = ['mcp', '--root', paths.workspace]; break;
     case 'cli': nativeArgs = args.slice(1); break;
-    default: throw new Error('用法：flow-bnb-desktop [install|login|status|logout|mcp|cli <Flow 命令>]');
+    default: throw new Error('用法：flow-bnb-desktop [onboard --client <客户端>|install|login|status|logout|mcp|cli <Flow 命令>]');
   }
   if (mode !== 'cli' && args.length > 1) throw new Error('该连接器命令不接受额外参数');
+  return runNative(paths, env, nativeArgs);
+}
+export async function runNative(paths, env, nativeArgs) {
   return await new Promise((resolve, reject) => {
     const child = spawn(paths.binary, nativeArgs, { cwd: paths.workspace, env, stdio: 'inherit', detached: true });
     const forward = signal => {

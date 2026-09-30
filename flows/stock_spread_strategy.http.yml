@@ -1,0 +1,75 @@
+schema_version: 1
+# One read-only evaluation of tokenPrice versus referencePrice, followed by a candidate intent.
+# Requires operator-owned Web3 API credentials. The reference is token-derived per-share data,
+# not an independent equity-market quote. Positive bps = above reference; negative = below.
+flow:
+  name: aaplon-reference-price-spread
+  inputs:
+    - name: stock_token
+      default: '0x390a684ef9cade28a7ad0dfa61ab1eb3842618c4'
+    - name: intent
+      default:
+        from_token: '0x55d398326f99059fF775485246999027B3197955'
+        to_token: '0x390a684ef9cade28a7ad0dfa61ab1eb3842618c4'
+        amount: '6'
+        slippage_bps: 50
+    - name: operator
+      default: lte
+    - name: threshold_bps
+      default: -100
+    - name: max_age_seconds
+      default: 300
+  steps:
+    - id: price
+      request:
+        kind: http
+        method: GET
+        url:
+          concat:
+            - literal: 'https://web3.binance.com/build/api/v1/dex/market/rwa/price?binanceChainId=56&tokenContractAddresses='
+            - input: stock_token
+      checks:
+        - {kind: status, equals: 200}
+        - {kind: jsonpath, path: '$.code', equals: {literal: 0}}
+      exports:
+        - {name: prices, path: '$.data'}
+    - id: spread
+      request:
+        kind: http
+        method: POST
+        url: {literal: 'https://flow-bnb.invalid/strategy/rwa-spread'}
+        body:
+          kind: json
+          value:
+            object:
+              prices: {output: {step: price, name: prices}}
+              stock_token: {input: stock_token}
+              intent: {input: intent}
+              operator: {input: operator}
+              threshold_bps: {input: threshold_bps}
+              max_age_seconds: {input: max_age_seconds}
+      checks:
+        - {kind: status, equals: 200}
+        - {kind: jsonpath, path: '$.success', equals: {literal: true}}
+      exports:
+        - {name: observation, path: '$.data'}
+        - {name: matched, path: '$.data.matched'}
+    - id: decision
+      request:
+        kind: http
+        method: POST
+        url: {literal: 'https://flow-bnb.invalid/strategy/decision'}
+        body:
+          kind: json
+          value:
+            object:
+              triggered: {output: {step: spread, name: matched}}
+              intent: {input: intent}
+      checks:
+        - {kind: status, equals: 200}
+        - {kind: jsonpath, path: '$.success', equals: {literal: true}}
+  outputs:
+    - name: spread
+      value: {output: {step: spread, name: observation}}
+    - name: threshold_met
+      value: {output: {step: spread, name: matched}}
