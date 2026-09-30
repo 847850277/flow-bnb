@@ -494,7 +494,9 @@ async fn main() -> Result<()> {
             let r = flow_bnb::agentic::run(c, i, &report, execute).await?;
             print_agentic_report(&r)?;
             anyhow::ensure!(
-                r.has_settlement() || matches!(r.state.as_str(), "ready" | "cancelled"),
+                r.has_settlement()
+                    || matches!(r.state.as_str(), "ready" | "cancelled")
+                    || (!execute && r.state == "audit_confirmation_required"),
                 "Agentic Wallet workflow stopped; inspect report"
             );
             Ok(())
@@ -704,6 +706,9 @@ fn operator_finished(status: &serde_json::Value) -> bool {
 
 fn print_agentic_report(r: &flow_bnb::agentic::Report) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(r)?);
+    if r.state == "audit_confirmation_required" {
+        eprintln!("代币审计数据不可用，尚未下单。手动执行时需在操作员终端审阅本次交易并输入 CONFIRM WITHOUT AUDIT；自动策略不能代替用户确认。");
+    }
     if r.state == "settled_with_discrepancy" {
         eprintln!("Order settled with an amount discrepancy; review settlement. Do not resubmit. Any existing submission lock is retained.");
     }

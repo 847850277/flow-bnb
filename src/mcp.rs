@@ -464,7 +464,7 @@ impl FlowBnbMcpServer {
 
     #[tool(
         name = "request_agentic_execution",
-        description = "Queue one native Agentic Wallet trade for an operator. Requires a stable request_id: reuse it with identical arguments on transport retries; never create a replacement to retry a trade. Uses operator-owned configuration and local token limits. Does not submit or approve; an operator's agentic-operator terminal must prepare afresh and confirm.",
+        description = "Queue one native Agentic Wallet trade for an operator. Requires a stable request_id: reuse it with identical arguments on transport retries; never create a replacement to retry a trade. Uses operator-owned configuration and local token limits. Does not submit or approve; an operator's agentic-operator terminal must prepare afresh and confirm. An audit_confirmation_required preview may be queued on the user's trade request; the operator must acknowledge the unavailable audit for this exact order. The model cannot provide that acknowledgement.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -541,7 +541,7 @@ impl FlowBnbMcpServer {
 
     #[tool(
         name = "prepare_agentic_trade",
-        description = "Read-only native Agentic Wallet preparation through Flow: account binding, local token amount/slippage limits, on-chain balances, quote and token audit. Does not submit. Uses operator-configured FLOW_BNB_AGENTIC_CONFIG. Limits differ from legacy Web3 execution policy.",
+        description = "Read-only native Agentic Wallet preparation through Flow: account binding, local token amount/slippage limits, on-chain balances, quote and token audit. Does not submit. audit_confirmation_required means Binance explicitly has no usable audit data, not that the token failed an audit. Show token_audit.message and next_action. On the user's trade request, queue with request_agentic_execution; the operator must type CONFIRM WITHOUT AUDIT for this one order. Do not bypass Flow, mark unavailable data safe, or supply acknowledgement through MCP. Known risks and other check failures remain blocked. Uses operator-configured FLOW_BNB_AGENTIC_CONFIG. Limits differ from legacy Web3 execution policy.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -623,7 +623,7 @@ impl FlowBnbMcpServer {
                 "MCP tools never accept Binance API credentials or wallet private keys; receipt reports omit the provider RPC URL.".to_owned(),
                 "Manual requests queue intents for operator review. Automatic execution needs an operator-created frozen strategy mandate with exact intent, cumulative budget, order count, cooldown and expiry. Generated flows themselves never sign or broadcast.".to_owned(),
                 "Legacy Web3 execution policy requires BSC, size/slippage/impact limits, successful simulation, and explicit operator confirmation.".to_owned(),
-                "Native Agentic Wallet uses separate token-quantity/slippage limits and account/balance/audit gates; it does not inherit legacy USD, price-impact or simulation guarantees. Native execution tools durably queue, query, cancel unclaimed requests and refresh existing orders; Manual execution uses agentic-operator confirmation; execute_bnb_authorized_strategy may submit within a pre-authorized mandate without a per-order prompt. Unknown outcomes or discrepancies halt automatic execution.".to_owned(),
+                "Native Agentic Wallet uses separate token-quantity/slippage limits and account/balance/audit gates; it does not inherit legacy USD, price-impact or simulation guarantees. Explicit unavailable audit flags produce audit_confirmation_required: a manual operator can accept the missing audit for one order with CONFIRM WITHOUT AUDIT; all checks run again, and new risks or worse quotes stop submission. Automatic mandates cannot accept unavailable audits. Native execution tools durably queue, query, cancel unclaimed requests and refresh existing orders; Manual execution uses agentic-operator confirmation; execute_bnb_authorized_strategy may submit within a pre-authorized mandate without a per-order prompt. Unknown outcomes or discrepancies halt automatic execution.".to_owned(),
                 "Use an isolated signer or Binance Agentic Wallet only after policy approval.".to_owned(),
             ],
         })

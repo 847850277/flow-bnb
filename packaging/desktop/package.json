@@ -1,6 +1,6 @@
 {
   "name": "@flow-bnb/desktop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Flow BNB desktop MCP launcher with bundled native binaries",
   "type": "module",
   "bin": {

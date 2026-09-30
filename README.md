@@ -36,7 +36,7 @@ sh install-flow-bnb.sh --client generic
 
 配置合并会保留其他 MCP、用户设置和注释，并备份原文件；重复安装不会重复添加。升级只更新安装器记录且未被用户改动的 Flow 条目，遇到同名冲突会停止。所有客户端默认共用 `~/.local/share/flow-bnb/` 中的钱包配置、策略和交易记录；已有源码工作区不会被自动迁移。
 
-**当前完成了配置适配测试和本机 macOS arm64 安装包/MCP 自动验收，尚未发布公开 Release，也未完成各客户端界面的逐一验收。** 上面的下载命令用于发布后的安装包。支持 macOS arm64/x64、Linux glibc x64/arm64；尚不支持 Windows 原生、Alpine 或只接受远程 HTTP/SSE 的客户端。构建本地预览和完整兼容性说明见 [安装包说明](packaging/README.md)。
+**安装包已在 [GitHub Releases](https://github.com/847850277/flow-bnb/releases) 提供，四个平台构建和打包验收已通过，各客户端界面的逐一验收仍待完成。** 支持 macOS arm64/x64、Linux glibc x64/arm64；尚不支持 Windows 原生、Alpine 或只接受远程 HTTP/SSE 的客户端。构建本地预览和完整兼容性说明见 [安装包说明](packaging/README.md)。
 
 ## 源码开发与本地运行
 
@@ -60,7 +60,9 @@ cargo run --locked -- agentic-trade \
   --report ".flow-bnb/preparation-$(date +%Y%m%d-%H%M%S).json"
 ```
 
-加 `--execute` 才进入真实执行流程，并要求在终端输入 `CONFIRM`。`amount` 使用人类可读单位，例如 `"0.01"`；`slippage_bps: 50` 表示 0.5%。恢复已有报告的只读跟踪使用 `agentic-track --report <原报告路径>`，不会重新下单。
+加 `--execute` 才进入真实执行流程，并要求在终端输入 `CONFIRM`。从 **0.1.2** 起，如果币安明确返回代币审计无结果或不支持，只读准备返回 `audit_confirmation_required`，保留报价并说明缺少的检查；手动执行会展示本次交易，要求输入 `CONFIRM WITHOUT AUDIT`，普通 `CONFIRM` 不会放行。确认仅适用于本次订单，随后重新检查钱包、余额、报价与审计；发现风险、报价输出减少或其他检查失败仍停止。确认记录写入报告，不改变白名单或自动策略授权。接口请求失败、响应格式错误继续停止，不作为审计豁免。
+
+`amount` 使用人类可读单位，例如 `"0.01"`；`slippage_bps: 50` 表示 0.5%。恢复已有报告的只读跟踪使用 `agentic-track --report <原报告路径>`，不会重新下单。
 
 ## MCP 接入
 
@@ -75,14 +77,14 @@ cargo run --locked -- agentic-operator --watch
 | MCP 工具 | 用途 |
 | --- | --- |
 | `connect_bnb_wallet` / `get_bnb_connection` | 准备依赖、官方钱包配对及只读状态查询 |
-| `prepare_agentic_trade` | 只读检查与报价 |
+| `prepare_agentic_trade` | 只读检查与报价；审计无数据时返回待用户确认，不能当作审计发现风险 |
 | `request_agentic_execution` | 交易排队；接收 `request_id` 和 `intent`，重试同一请求必须复用相同 ID 与参数 |
 | `get_agentic_execution` | 用返回的 `intent_id` 查询执行结果 |
 | `cancel_agentic_execution` | 取消尚未被操作员领取的请求 |
 | `refresh_agentic_execution` | 恢复已有订单的只读核对 |
 | `inspect_agentic_order` | 核对其他入口已提交的订单 |
 
-上述手动模式在操作员终端逐笔确认；预授权自动模式见下文。MCP 排队不等于授权。源码方式使用上述本地配置；连接器安装包已可构建，公开发布与各客户端界面验收待完成。
+上述手动模式在操作员终端逐笔确认；预授权自动模式见下文。MCP 排队不等于授权。对于 `audit_confirmation_required`，Agent 应展示审计不可用的说明；用户请求交易后可用 `request_agentic_execution` 入队，操作员终端再针对这一笔确认。MCP 没有跳过审计的参数，Agent 不应通过直接调用钱包绕过此流程。源码方式使用上述本地配置；各客户端界面验收仍待完成。
 
 ## 自定义策略
 
@@ -131,7 +133,7 @@ cargo run --locked -- strategy-revoke --id apple-small
 
 ## 当前边界
 
-原生执行面向 BSC 的 ERC-20 兑换，检查账户、链、余额、代币数量和滑点等规则；没有继承旧 Web3 后端的美元额度、价格冲击或独立模拟保证。非内置可信目标需要有效的代币审计结果。Agentic Wallet 使用自己的登录会话，原生订单无需 Web3 API Key；旧 Web3 API 数据流程需要单独配置认证。
+原生执行面向 BSC 的 ERC-20 兑换，检查账户、链、余额、代币数量和滑点等规则；没有继承旧 Web3 后端的美元额度、价格冲击或独立模拟保证。非内置可信目标默认需要有效的代币审计结果；明确无数据时，手动订单可由用户逐笔确认继续，自动策略仍停止。已有风险、异常税率或响应异常不能用这项确认跳过。此处理参考币安的[审计不可用说明](https://github.com/binance/binance-skills-hub/blob/main/skills/binance-web3/binance-agentic-wallet/references/security.md)。Agentic Wallet 使用自己的登录会话，原生订单无需 Web3 API Key；旧 Web3 API 数据流程需要单独配置认证。
 
 `completed` 表示成交与数量核对一致；`settled_with_discrepancy` 表示已成交但存在数量差额，需要复核。提交结果未知或有差额时保留提交锁，不自动重试或补卖；不要通过新请求 ID 或删除锁绕过检查。
 
