@@ -16,7 +16,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::receipt::{watch_transaction, WatchOptions, WatchReport, TRANSACTION_RECEIPT};
@@ -26,6 +26,15 @@ use crate::policy::{Evaluation, TradeIntent, TradePolicy};
 const RWA_DISCOVERY: &str = include_str!("../flows/rwa_discovery.http.yml");
 const WALLET_SNAPSHOT: &str = include_str!("../flows/wallet_snapshot.http.yml");
 const SAFE_SWAP_PREPARATION: &str = include_str!("../flows/safe_swap_preparation.http.yml");
+
+// MCP structured output must be an object. Value alone generates an unconstrained
+// schema, which strict clients reject while loading the entire tool list.
+fn json_object(value: Value) -> Result<Json<Map<String, Value>>, String> {
+    match value {
+        Value::Object(object) => Ok(Json(object)),
+        _ => Err("MCP structured output must be a JSON object".into()),
+    }
+}
 
 #[derive(Clone)]
 pub struct FlowBnbMcpServer {
@@ -212,7 +221,7 @@ impl FlowBnbMcpServer {
     #[tool(
         description = "Read wallet connection and pending login progress. Does not install, sign in or trade. During pairing poll every 3–5 seconds and show the official login_url and pairing_code to the user."
     )]
-    pub async fn get_bnb_connection(&self) -> Result<Json<Value>, String> {
+    pub async fn get_bnb_connection(&self) -> Result<Json<Map<String, Value>>, String> {
         let state = self
             .connection
             .lock()
@@ -222,29 +231,29 @@ impl FlowBnbMcpServer {
             state["phase"].as_str(),
             Some("preparing" | "awaiting_wallet" | "failed")
         ) {
-            return Ok(Json(state));
+            return json_object(state);
         }
         let config = crate::setup::config_path(&self.root);
-        Ok(Json(match crate::setup::connection_status(&config).await {
+        json_object(match crate::setup::connection_status(&config).await {
             Ok(address) => {
                 serde_json::json!({"phase":"connected","connected":true,"wallet_address":address})
             }
             Err(_) => {
                 serde_json::json!({"phase":"disconnected","connected":false,"message":"Ask the user to connect the wallet with connect_bnb_wallet. This does not authorize trading."})
             }
-        }))
+        })
     }
 
     #[tool(
         description = "On explicit user request to connect/reconnect their wallet, prepare managed dependencies and start official Binance Agentic Wallet pairing. Returns immediately; poll get_bnb_connection for login URL/code and completion. No private keys, trade, or trading mandate. Does not open a browser automatically."
     )]
-    pub async fn connect_bnb_wallet(&self) -> Result<Json<Value>, String> {
+    pub async fn connect_bnb_wallet(&self) -> Result<Json<Map<String, Value>>, String> {
         let mut state = self.connection.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(
             state["phase"].as_str(),
             Some("preparing" | "awaiting_wallet")
         ) {
-            return Ok(Json(state.clone()));
+            return json_object(state.clone());
         }
         *state = serde_json::json!({"phase":"preparing", "message":"正在准备依赖；请调用 get_bnb_connection 查看登录链接与进度。"});
         let response = state.clone();
@@ -261,7 +270,7 @@ impl FlowBnbMcpServer {
                 }
             };
         });
-        Ok(Json(response))
+        json_object(response)
     }
 
     #[tool(
@@ -276,14 +285,14 @@ impl FlowBnbMcpServer {
     fn get_bnb_strategy_authorization(
         &self,
         Parameters(a): Parameters<AuthorizationQuery>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         let c = agentic_config(&self.root)?;
         match a.authorization_id {
             Some(id) => crate::autonomy::status(&c, &id),
             None => crate::autonomy::list(&c),
         }
-        .map(Json)
         .map_err(|e| e.to_string())
+        .and_then(json_object)
     }
     #[tool(
         name = "execute_bnb_authorized_strategy",
@@ -297,14 +306,14 @@ impl FlowBnbMcpServer {
     fn execute_bnb_authorized_strategy(
         &self,
         Parameters(a): Parameters<AuthorizedExecutionArgs>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         crate::autonomy::start(
             agentic_config(&self.root)?,
             a.authorization_id,
             a.request_id,
         )
-        .map(Json)
         .map_err(|e| e.to_string())
+        .and_then(json_object)
     }
     #[tool(
         name = "get_bnb_authorized_execution",
@@ -318,14 +327,14 @@ impl FlowBnbMcpServer {
     fn get_bnb_authorized_execution(
         &self,
         Parameters(a): Parameters<AuthorizedExecutionArgs>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         crate::autonomy::execution(
             &agentic_config(&self.root)?,
             &a.authorization_id,
             &a.request_id,
         )
-        .map(Json)
         .map_err(|e| e.to_string())
+        .and_then(json_object)
     }
     #[tool(
         name = "refresh_bnb_authorized_execution",
@@ -339,15 +348,15 @@ impl FlowBnbMcpServer {
     async fn refresh_bnb_authorized_execution(
         &self,
         Parameters(a): Parameters<AuthorizedExecutionArgs>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         crate::autonomy::refresh(
             agentic_config(&self.root)?,
             a.authorization_id,
             a.request_id,
         )
         .await
-        .map(Json)
         .map_err(|e| e.to_string())
+        .and_then(json_object)
     }
     #[tool(
         name = "revoke_bnb_strategy_authorization",
@@ -361,10 +370,10 @@ impl FlowBnbMcpServer {
     fn revoke_bnb_strategy_authorization(
         &self,
         Parameters(a): Parameters<AuthorizationId>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         crate::autonomy::revoke(&agentic_config(&self.root)?, &a.authorization_id)
-            .map(Json)
             .map_err(|e| e.to_string())
+            .and_then(json_object)
     }
 
     #[tool(
@@ -379,7 +388,7 @@ impl FlowBnbMcpServer {
     fn save_bnb_flow(
         &self,
         Parameters(a): Parameters<SaveFlowArguments>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         if a.overwrite {
             let hash = a
                 .expected_sha256
@@ -389,10 +398,10 @@ impl FlowBnbMcpServer {
         }
         let (_, summary, yaml) = Self::compile_source(&a.yaml)?;
         let saved_path = self.save(&a.path, &yaml, a.overwrite)?;
-        Ok(Json(
+        json_object(
             serde_json::json!({"saved_path":saved_path,"sha256":source_hash(&yaml),"summary":summary,
             "strategy_validation_error":crate::strategy::check(&yaml).err().map(|e|e.to_string())}),
-        ))
+        )
     }
 
     #[tool(
@@ -407,12 +416,12 @@ impl FlowBnbMcpServer {
     fn read_bnb_flow(
         &self,
         Parameters(a): Parameters<ReadFlowArguments>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         let source = self.read_flow(&a.path, None)?;
         let (_, summary, _) = Self::compile_source(&source)?;
-        Ok(Json(
+        json_object(
             serde_json::json!({"path":a.path,"yaml":source,"sha256":source_hash(&source),"summary":summary}),
-        ))
+        )
     }
 
     #[tool(
@@ -427,16 +436,14 @@ impl FlowBnbMcpServer {
     async fn run_bnb_strategy(
         &self,
         Parameters(a): Parameters<RunStrategyArguments>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         let source = self.read_flow(&a.path, a.expected_sha256.as_deref())?;
         let snapshot =
             crate::strategy::Snapshot::new(&source, a.inputs).map_err(|e| e.to_string())?;
         let report = crate::strategy::run(&agentic_config(&self.root)?, &snapshot)
             .await
             .map_err(|e| e.to_string())?;
-        Ok(Json(
-            serde_json::json!({"sha256":source_hash(&source),"report":report}),
-        ))
+        json_object(serde_json::json!({"sha256":source_hash(&source),"report":report}))
     }
 
     #[tool(
@@ -451,15 +458,15 @@ impl FlowBnbMcpServer {
     async fn request_bnb_strategy_execution(
         &self,
         Parameters(a): Parameters<QueueStrategyArguments>,
-    ) -> Result<Json<Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         let source = self.read_flow(&a.path, Some(&a.expected_sha256))?;
         let snapshot =
             crate::strategy::Snapshot::new(&source, a.inputs).map_err(|e| e.to_string())?;
         agentic_inbox(&self.root)?
             .enqueue_strategy(a.request_id, snapshot)
             .await
-            .map(Json)
             .map_err(|e| e.to_string())
+            .and_then(json_object)
     }
 
     #[tool(
@@ -474,11 +481,11 @@ impl FlowBnbMcpServer {
     fn request_agentic_execution(
         &self,
         Parameters(args): Parameters<AgenticExecutionArgs>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         agentic_inbox(&self.root)?
             .enqueue(args.request_id, args.intent)
-            .map(Json)
             .map_err(|e| e.to_string())
+            .and_then(json_object)
     }
 
     #[tool(
@@ -493,11 +500,11 @@ impl FlowBnbMcpServer {
     fn get_agentic_execution(
         &self,
         Parameters(args): Parameters<ExecutionIntentId>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         agentic_inbox(&self.root)?
             .status(&args.intent_id)
-            .map(Json)
             .map_err(|e| e.to_string())
+            .and_then(json_object)
     }
 
     #[tool(
@@ -512,11 +519,11 @@ impl FlowBnbMcpServer {
     fn cancel_agentic_execution(
         &self,
         Parameters(args): Parameters<ExecutionIntentId>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         agentic_inbox(&self.root)?
             .cancel(&args.intent_id)
-            .map(Json)
             .map_err(|e| e.to_string())
+            .and_then(json_object)
     }
 
     #[tool(
@@ -531,12 +538,12 @@ impl FlowBnbMcpServer {
     async fn refresh_agentic_execution(
         &self,
         Parameters(args): Parameters<ExecutionIntentId>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         agentic_inbox(&self.root)?
             .refresh(&args.intent_id)
             .await
-            .map(Json)
             .map_err(|e| e.to_string())
+            .and_then(json_object)
     }
 
     #[tool(
@@ -551,14 +558,14 @@ impl FlowBnbMcpServer {
     async fn prepare_agentic_trade(
         &self,
         Parameters(intent): Parameters<crate::agentic::Intent>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         let c = agentic_config(&self.root)?;
         let report = crate::agentic::prepare(&c, intent)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_value(report)
-            .map(Json)
             .map_err(|e| e.to_string())
+            .and_then(json_object)
     }
     #[tool(
         name = "inspect_agentic_order",
@@ -572,14 +579,14 @@ impl FlowBnbMcpServer {
     async fn inspect_agentic_order(
         &self,
         Parameters(args): Parameters<AgenticOrderArgs>,
-    ) -> Result<Json<serde_json::Value>, String> {
+    ) -> Result<Json<Map<String, Value>>, String> {
         let report =
             crate::agentic::inspect_order(agentic_config(&self.root)?, args.intent, args.order_id)
                 .await
                 .map_err(|e| e.to_string())?;
         serde_json::to_value(report)
-            .map(Json)
             .map_err(|e| e.to_string())
+            .and_then(json_object)
     }
 
     #[tool(
@@ -976,7 +983,54 @@ pub struct ExecutionIntentId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::handler::server::tool::IntoCallToolResult;
+    use serde_json::json;
     use tempfile::tempdir;
+
+    #[test]
+    fn structured_output_preserves_objects_and_rejects_other_roots() {
+        let value = json!({"state":"pending", "items":[], "result":null});
+        let result = json_object(value.clone())
+            .unwrap()
+            .into_call_tool_result()
+            .unwrap();
+        let rmcp::model::CallToolResponse::Complete(result) = result else {
+            panic!("structured output must complete synchronously");
+        };
+        let result = serde_json::to_value(result).unwrap();
+        assert_eq!(result["structuredContent"], value);
+        assert_eq!(
+            serde_json::from_str::<Value>(result["content"][0]["text"].as_str().unwrap()).unwrap(),
+            value
+        );
+        for value in [json!(null), json!([]), json!(true), json!(1), json!("text")] {
+            assert!(json_object(value).is_err());
+        }
+    }
+
+    #[test]
+    fn all_tools_advertise_object_output_schemas() {
+        let tools = FlowBnbMcpServer::tool_router().list_all();
+        assert!(!tools.is_empty());
+        for tool in &tools {
+            let schema = tool.output_schema.as_ref().unwrap();
+            assert_eq!(schema.get("type"), Some(&json!("object")), "{}", tool.name);
+            if let Some(properties) = schema.get("properties") {
+                for (name, property) in properties.as_object().unwrap() {
+                    assert!(
+                        property.is_object(),
+                        "{}.{} must use an object schema",
+                        tool.name,
+                        name
+                    );
+                }
+            }
+        }
+        let trade = tools.iter().find(|t| t.name == "prepare_trade").unwrap();
+        let sources = &trade.output_schema.as_ref().unwrap()["properties"]["balance_sources"];
+        assert_eq!(sources["type"], "object");
+        assert_eq!(sources["additionalProperties"]["type"], "string");
+    }
 
     #[test]
     fn all_embedded_templates_compile() {

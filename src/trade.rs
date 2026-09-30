@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -110,7 +111,7 @@ pub struct TradeReport {
     pub quote: Option<QuoteEvidence>,
     pub sell_balance: Option<String>,
     pub buy_balance: Option<String>,
-    pub balance_sources: Value,
+    pub balance_sources: BTreeMap<String, String>,
     pub transaction: Option<TransactionSummary>,
     pub simulation_status: Option<String>,
     pub rfq_payload_sha256: Option<String>,
@@ -353,7 +354,7 @@ pub async fn prepare_with_transport<T: HttpTransport + Clone + 'static>(
             quote: None,
             sell_balance: None,
             buy_balance: None,
-            balance_sources: json!({}),
+            balance_sources: BTreeMap::new(),
             transaction: None,
             simulation_status: None,
             rfq_payload_sha256: None,
@@ -490,9 +491,13 @@ async fn prepare<T: HttpTransport + Clone + 'static>(
             } else {
                 "buy"
             };
-            report.balance_sources[side] = json!(asset["flowBnbBalanceSource"]
-                .as_str()
-                .unwrap_or("wallet_api"));
+            report.balance_sources.insert(
+                side.into(),
+                asset["flowBnbBalanceSource"]
+                    .as_str()
+                    .unwrap_or("wallet_api")
+                    .into(),
+            );
         }
     }
     report.sell_balance = sell.as_ref().map(|n| n.to_str_radix(10));

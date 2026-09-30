@@ -110,7 +110,9 @@ include all four binaries. macOS x64/arm64 bundle UI testing is separate.
 
 Acceptance uses synthetic client homes, the real npm tarball and bundled parsers,
 real MCP initialization/tool discovery/strategy generation, and the universal
-shell installer. It never registers into real clients or logs into a real wallet.
+shell installer. The official TypeScript MCP SDK validates the complete tool list,
+compiles every output schema and checks sampled structured results and their text
+fallbacks. It never registers into real clients or logs into a real wallet.
 `tests/setup.rs` exercises wallet pairing and reconnect with a fixture backend,
 including nonblocking MCP pairing, account mismatch and preservation of locks.
 
