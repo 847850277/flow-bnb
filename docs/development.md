@@ -46,7 +46,6 @@ cargo run --locked -- agentic-trade \
 | `refresh_agentic_execution` | 恢复已有订单的只读核对 |
 | `inspect_agentic_order` | 核对其他入口已提交的订单 |
 | `step_bnb_cycle` / `get_bnb_cycle` | 推进或查询保存的跨资产流程；`execute=true` 可触发真实交易，默认仅预览 |
-| `replay_bnb_cycle` | 使用合成报价和回执运行 YAML，无需钱包，不访问实盘 |
 | `run_bnb_strategy` | 只读求值保存的条件策略 |
 | `request_bnb_strategy_execution` | 条件成立时直接启动一次真实交易，使用相同的结果查询工具 |
 
@@ -77,7 +76,7 @@ cargo run --locked -- strategy-run flows/stock_strategy.http.yml \
 
 股票场景使用 `generate_bnb_flow(template="stock_spread_strategy")`：读取 AAPLon 的链上价和 API 参考价，计算 `(链上价 - 参考价) / 参考价 × 10000`，默认低于参考价至少 100 bp（1%）时产生 6 USDT 的候选买入意图。正值表示高于参考价，负值表示低于参考价；参数支持改为溢价条件及卖出意图。计算使用精确十进制，缺价、零价、过期价格及代币不匹配均停止求值。此场景需要 Web3 API 凭据，执行前复查沿用同一冻结策略。
 
-官方 `referencePrice` 是由链上价格换算的每股参考价，因此该指标表示 API 字段间偏离；独立标的市场的真实折溢价还需要外部行情与份额换算。输出标明参考价口径，更新时间检查仅针对 `tokenPriceUpdatedAt`。完整的只读命令、边界说明和 WorkBuddy 演示提示见 [股票参考价偏离监控](stock-spread-demo.md)。
+官方 `referencePrice` 是由链上价格换算的每股参考价，因此该指标表示 API 字段间偏离；独立标的市场的真实折溢价还需要外部行情与份额换算。输出标明参考价口径，更新时间检查仅针对 `tokenPriceUpdatedAt`。
 
 策略使用标准 Flow YAML。内置本地端点 `https://flow-bnb.invalid/strategy/quote` 接收交易意图、返回原生报价；`compare` 接收十进制字符串 `left` / `right` 和 `operator`（eq/gt/gte/lt/lte）；`rwa-spread` 接收 RWA 价格数组、监控代币、交易意图、比较符、带符号的 bp 阈值和最大价格年龄；`decision` 接收 `triggered` 和 `intent`。这些 POST 由本地适配器处理。也允许官方 Web3 的 RWA 平台、搜索、价格和钱包余额 GET 查询，相关步骤需要 API Key。其他网络地址、文件请求体、认证注入及直接下单操作会被拒绝。
 
@@ -85,9 +84,38 @@ cargo run --locked -- strategy-run flows/stock_strategy.http.yml \
 
 ## 跨资产开仓与退出
 
-v0.3.0 提供 `linked_stock_cycle` 模板和 `cycle-step` / `cycle-status` / `cycle-replay` 命令。YAML 定义观察对象和买卖条件；执行器保存基准、阶段、实际成本与到账数量，完成一轮后结束。`scripts/run-cycle.sh` 只负责定时调用，安装包也附带该脚本。
+从 v0.3.0 起提供 `linked_stock_cycle` 模板和 `cycle-step` / `cycle-status` 命令。YAML 定义观察对象和买卖条件；执行器保存基准、阶段、实际成本与到账数量，完成一轮后结束。`scripts/run-cycle.sh` 只负责定时调用，安装包也附带该脚本。
 
-新增本地操作 `observe-quote` 支持只读观察另一种代币，`relative-change` 使用精确比例比较，`context` 承接执行器提供的阶段和持仓信息。完整数据口径、WorkBuddy 提示词和安装包命令见 [跨资产流程演示](linked-stock-cycle-demo.md)。
+新增本地操作 `observe-quote` 支持只读观察另一种代币，`relative-change` 使用精确比例比较，`context` 承接执行器提供的阶段和持仓信息。NVDAon 信号来自固定 5 USDT 报价的隐含价格，以首次运行时为基准；它不是美股日内涨跌幅。退出条件按本轮实际到账数量的可卖报价与实际成本比较，gas 单独核对。
+
+WorkBuddy 创建策略提示词：
+
+```text
+用 Flow BNB 创建并保存 strategies/nvda-apple.http.yml：监控 NVDAon，以策略启动时固定金额报价的隐含价格为基准，下跌 2% 时买入 5 USDT 的 AAPLon。买入后按实际到账数量持仓，可卖报价达到实际买入成本的 102% 时卖出并结束。
+
+使用 linked_stock_cycle 模板，校验并保存 YAML，展示参数、规则和保存路径。执行时直接用安装包自带的 run-cycle.sh 循环运行该文件；条件判断留在 YAML 中，不另写买卖判断代码。
+```
+
+macOS Apple 芯片安装版，进入 MCP 保存策略的同一个工作区。以下命令会在条件满足时真实买卖：
+
+```sh
+flow_data="${FLOW_BNB_HOME:-$HOME/.local/share/flow-bnb}"
+flow_version="$flow_data/versions/0.3.1-darwin-arm64"
+cd "$flow_data/workspace"
+bash "$flow_version/run-cycle.sh" strategies/nvda-apple.http.yml nvda-apple-demo-01 --execute
+```
+
+Intel Mac 使用 `darwin-x64`；Linux 使用 `linux-arm64` 或 `linux-x64`。源码用户使用：
+
+```sh
+cargo build --locked
+FLOW_BNB_BIN="$PWD/target/debug/flow-bnb" \
+  bash scripts/run-cycle.sh strategies/nvda-apple.http.yml nvda-apple-demo-01 --execute
+```
+
+默认每 10 秒调用一次，可用 `FLOW_BNB_POLL_SECONDS` 修改间隔。省略 `--execute` 时仅按真实报价预览条件；无需先预览才能执行。复用同一个 `run_id` 可继续原阶段，完成后脚本退出。`Ctrl+C` 停止未来轮询，不会撤回已经提交的订单。
+
+钱包沿用原配置及限额；5 USDT 买到的 AAPLon 可能超过新安装默认的 0.01 卖出上限，执行器在开仓前检查预计持仓能否按当前限额退出。查看本轮状态使用 `cycle-status --run-id nvda-apple-demo-01`。
 
 ## 可选的策略预算
 

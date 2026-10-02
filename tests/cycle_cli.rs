@@ -1,22 +1,59 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 #[test]
-fn replay_cli_is_explicitly_simulated_and_needs_no_wallet() {
-    let output = Command::new(env!("CARGO_BIN_EXE_flow-bnb"))
-        .args(["cycle-replay", "flows/linked_stock_cycle.http.yml"])
-        .env("FLOW_BNB_AGENTIC_CONFIG", "/nonexistent/wallet.json")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+fn cycle_preview_preserves_its_baseline_between_cli_processes_without_submitting() {
+    let d = tempfile::tempdir().unwrap();
+    let wallet = d.path().join("quote-only-wallet");
+    fs::write(&wallet, r#"#!/bin/sh
+if [ "$1 $2" != 'market-order quote' ]; then exit 81; fi
+printf 'quote\n' >> "$CYCLE_PREVIEW_FIXTURE/calls"
+amount=$(/bin/cat "$CYCLE_PREVIEW_FIXTURE/quote")
+printf '{"success":true,"data":{"fromCoinSymbol":"USDT","toCoinSymbol":"NVDAon","fromCoinAmount":"5","toCoinAmount":"%s","slippage":0.005}}\n' "$amount"
+"#).unwrap();
+    fs::set_permissions(&wallet, fs::Permissions::from_mode(0o700)).unwrap();
+    let config = d.path().join("agentic.json");
+    let mut c: Value =
+        serde_json::from_str(include_str!("../examples/agentic-config.json")).unwrap();
+    c["executable"] = json!(wallet);
+    c["wallet_address"] = json!(format!("0x{}", "1".repeat(40)));
+    c["state_dir"] = json!(d.path().join("state"));
+    c["rpc_url"] = json!("http://127.0.0.1:1");
+    fs::write(&config, c.to_string()).unwrap();
+    let run = |command: &str| -> Value {
+        let mut cli = Command::new(env!("CARGO_BIN_EXE_flow-bnb"));
+        cli.arg(command);
+        if command == "cycle-step" {
+            cli.arg("flows/linked_stock_cycle.http.yml");
+        }
+        let output = cli
+            .args(["--run-id", "preview", "--config"])
+            .arg(&config)
+            .env("CYCLE_PREVIEW_FIXTURE", d.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    fs::write(d.path().join("quote"), "0.0245").unwrap();
+    let initial = run("cycle-step");
+    assert_eq!(initial["phase"], "waiting_entry");
+    assert_eq!(initial["baseline_receive"], "0.0245");
+    fs::write(d.path().join("quote"), "0.025").unwrap();
+    let triggered = run("cycle-step");
+    assert_eq!(triggered["phase"], "waiting_entry");
+    assert_eq!(triggered["baseline_receive"], "0.0245");
+    assert_eq!(triggered["ready_to_submit"], true);
+    assert!(triggered["buy"].is_null());
+    assert_eq!(run("cycle-status"), triggered);
+    assert_eq!(
+        fs::read_to_string(d.path().join("calls")).unwrap(),
+        "quote\nquote\n"
     );
-    let r: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(r["mode"], "simulation");
-    assert_eq!(r["live_transactions"], false);
-    assert_eq!(r["simulated_orders"], 2);
 }
 
 #[test]

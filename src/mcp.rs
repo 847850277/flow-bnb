@@ -513,27 +513,6 @@ impl FlowBnbMcpServer {
     }
 
     #[tool(
-        name = "replay_bnb_cycle",
-        description = "SIMULATION ONLY: run saved linked-stock cycle YAML through synthetic NVDA quote changes and synthetic AAPL entry/exit receipts. Never connects to a wallet or submits. Returns per-step branch evidence, simulated order count and an explicit simulation label. This is neither live trading nor historical backtesting.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            open_world_hint = false
-        )
-    )]
-    async fn replay_bnb_cycle(
-        &self,
-        Parameters(a): Parameters<RunStrategyArguments>,
-    ) -> Result<Json<Map<String, Value>>, String> {
-        let source = self.read_flow(&a.path, a.expected_sha256.as_deref())?;
-        let base = crate::strategy::Snapshot::new(&source, a.inputs).map_err(|e| e.to_string())?;
-        crate::cycle::replay(base)
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(json_object)
-    }
-
-    #[tool(
         name = "request_agentic_execution",
         description = "REAL TRADING: start one native Agentic Wallet trade directly, without CONFIRM or agentic-operator. Use only for an explicit execution request, not a quote question. Preparation and submission run in the background; keep MCP running and poll get_agentic_execution. Use a stable request_id and identical arguments on retries; never replace an ID to replay a pending or unknown order. Missing audit data is reported as a warning. No separate strategy authorization or YAML is required for a simple trade.",
         annotations(
@@ -664,7 +643,7 @@ impl FlowBnbMcpServer {
             templates: vec![
                 TemplateInfo::new(FlowTemplate::StockStrategy, "Editable native quote -> exact minimum receive threshold -> trade decision. Preview with run_bnb_strategy; execute with request_bnb_strategy_execution. No Web3 key needed."),
                 TemplateInfo::new(FlowTemplate::StockSpreadStrategy, "RWA token price vs API reference price -> exact signed basis-point threshold -> candidate intent. Validates token identity and token-price age. Requires Web3 credentials. The reference is token-derived per-share data, not an independent equity quote. Read-only preview via run_bnb_strategy."),
-                TemplateInfo::new(FlowTemplate::LinkedStockCycle, "Monitor NVDAon quote-implied price -> buy AAPLon after a 2% drop -> quote actual received inventory -> exit at +2% versus entry cost. YAML owns conditions; step_bnb_cycle/cycle-step persists phases and at most one entry/exit per run. replay_bnb_cycle is synthetic simulation; live execution is separate. No Web3 API key required."),
+                TemplateInfo::new(FlowTemplate::LinkedStockCycle, "Monitor NVDAon quote-implied price -> buy AAPLon after a 2% drop -> quote actual received inventory -> exit at +2% versus entry cost. YAML owns conditions; step_bnb_cycle/cycle-step persists phases and at most one entry/exit per run. Use scripts/run-cycle.sh for polling saved YAML. No Web3 API key required."),
                 TemplateInfo::new(FlowTemplate::AgenticStage, "Native wallet checks, quotes and order submission through a local process adapter; use the native execution tool or agentic-trade --execute."),
                 TemplateInfo::new(FlowTemplate::AgenticOrder, "Bounded native order polling through the local adapter; use agentic-track or inspect_agentic_order."),
                 TemplateInfo::new(FlowTemplate::TransactionReceipt, "Track an existing transaction via read-only JSON-RPC with bounded polling and confirmation checks; requires the flow-bnb receipt adapter."),
@@ -912,7 +891,7 @@ impl ServerHandler for FlowBnbMcpServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("flow-bnb-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Check get_bnb_connection when connection status or configured token addresses/limits are unknown; use its tokens to resolve symbols without reading files or generating code. Use connect_bnb_wallet only when disconnected, then show the login_url and pairing_code for the user to pair in Binance App. For a quote or a question about buying, use prepare_agentic_trade (read-only). When the user explicitly requests a trade, call request_agentic_execution with a stable request_id; it prepares and executes directly. No CONFIRM, operator terminal, strategy authorization, generated code, YAML, policy evaluation or execution-plan call is required for a simple trade. Keep MCP running and poll get_agentic_execution every 3–5 seconds. Do not treat an executing response as completed. On retries reuse the same request_id and identical intent; never use a new ID to replay an unknown or submitted order. Show unavailable audits as warnings without claiming safety. For conditional strategies, generate/edit a strategy template, validate/save it, then run_bnb_strategy for a read-only preview or request_bnb_strategy_execution for explicitly requested execution with its source hash and stable ID. Conditions are rechecked before submission. Existing strategy authorizations are optional budgets, not an onboarding prerequisite. Use execute_bnb_authorized_strategy only when the user chooses an existing authorization. Never ask for private keys or API secrets. For a saved cross-asset entry/exit workflow, generate linked_stock_cycle, save it, and use replay_bnb_cycle for explicitly labelled synthetic simulation. step_bnb_cycle advances one persistent run; execute=true may place real entry/exit orders and requires the user to request that cycle. Reuse the run_id and identical source/inputs; do not restart completed or unknown cycles under a new ID. For unattended polling use the CLI cycle-step wrapper, not repeated model reasoning. Conditions live in YAML and entry inventory comes from confirmed receipts. Wallet signing remains in Agentic Wallet.",
+                "Check get_bnb_connection when connection status or configured token addresses/limits are unknown; use its tokens to resolve symbols without reading files or generating code. Use connect_bnb_wallet only when disconnected, then show the login_url and pairing_code for the user to pair in Binance App. For a quote or a question about buying, use prepare_agentic_trade (read-only). When the user explicitly requests a trade, call request_agentic_execution with a stable request_id; it prepares and executes directly. No CONFIRM, operator terminal, strategy authorization, generated code, YAML, policy evaluation or execution-plan call is required for a simple trade. Keep MCP running and poll get_agentic_execution every 3–5 seconds. Do not treat an executing response as completed. On retries reuse the same request_id and identical intent; never use a new ID to replay an unknown or submitted order. Show unavailable audits as warnings without claiming safety. For conditional strategies, generate/edit a strategy template, validate/save it, then run_bnb_strategy for a read-only preview or request_bnb_strategy_execution for explicitly requested execution with its source hash and stable ID. Conditions are rechecked before submission. Existing strategy authorizations are optional budgets, not an onboarding prerequisite. Use execute_bnb_authorized_strategy only when the user chooses an existing authorization. Never ask for private keys or API secrets. For a saved cross-asset entry/exit workflow, generate linked_stock_cycle, validate and save the YAML, then use the CLI cycle-step polling script to run it when the user requests execution. step_bnb_cycle advances one persistent run; execute=true may place real entry/exit orders and requires the user to request that cycle. Reuse the run_id and identical source/inputs; do not restart completed or unknown cycles under a new ID. For unattended polling use the CLI cycle-step wrapper, not repeated model reasoning. Conditions live in YAML and entry inventory comes from confirmed receipts. Wallet signing remains in Agentic Wallet.",
             )
     }
 }

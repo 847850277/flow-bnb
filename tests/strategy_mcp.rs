@@ -116,7 +116,7 @@ fn calls(root: &Path) -> usize {
 }
 
 #[test]
-fn linked_cycle_can_be_generated_saved_and_replayed_without_wallet_configuration() {
+fn linked_cycle_can_be_generated_validated_and_saved_without_wallet_configuration() {
     let d = tempfile::tempdir().unwrap();
     let mut m = Mcp::start(d.path());
     let generated = m.tool(
@@ -131,14 +131,12 @@ fn linked_cycle_can_be_generated_saved_and_replayed_without_wallet_configuration
         "save_bnb_flow",
         json!({"path":"strategies/linked.http.yml","yaml":yaml}),
     );
-    let replay = m.tool(
-        "replay_bnb_cycle",
-        json!({"path":"strategies/linked.http.yml","expected_sha256":saved["sha256"]}),
+    let read = m.tool(
+        "read_bnb_flow",
+        json!({"path":"strategies/linked.http.yml"}),
     );
-    assert_eq!(replay["mode"], "simulation");
-    assert_eq!(replay["live_transactions"], false);
-    assert_eq!(replay["final_phase"], "completed");
-    assert_eq!(replay["simulated_orders"], 2);
+    assert_eq!(read["sha256"], saved["sha256"]);
+    assert_eq!(read["yaml"], generated["canonical_yaml"]);
     assert!(!d.path().join(".flow-bnb").exists());
 }
 

@@ -96,7 +96,7 @@ remain in place.
 
 Since v0.3.0, the installer also verifies and stores `run-cycle.sh` beside the
 versioned binary. The script uses that binary directly and only schedules cycle
-commands; it does not implement price conditions. See the [linked-stock demo](../docs/linked-stock-cycle-demo.md)
+commands; it does not implement price conditions. See the [cycle usage](../docs/development.md#跨资产开仓与退出)
 for commands using the existing installed workspace.
 
 Registration preserves unrelated settings and JSONC/TOML comments. Existing files
@@ -155,9 +155,9 @@ contents change (installed version contents are immutable). Publish all assets:
 
 Public links use a fixed GitHub release version. There is no assumed npm registry
 publication. Public repository/release publication and marketplace submission are
-separate actions. [v0.3.0](https://github.com/847850277/flow-bnb/releases/tag/v0.3.0)
+separate actions. [v0.3.1](https://github.com/847850277/flow-bnb/releases/tag/v0.3.1)
 distributes all six assets. Packaged MCP acceptance includes generation, saving
-and synthetic replay of the cross-asset cycle. Automated checks do not establish
+and read-back of the cross-asset YAML. Execution logic is covered by test-only fixtures. Automated checks do not establish
 UI acceptance in every supported client or a live-trade test of the new cycle.
 
 ## Primary configuration references

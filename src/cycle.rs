@@ -18,8 +18,8 @@ use std::{
     path::PathBuf,
 };
 
-mod replay;
-pub use replay::run as replay;
+#[cfg(test)]
+mod tests;
 
 pub const TEMPLATE: &str = include_str!("../flows/linked_stock_cycle.http.yml");
 const CONTEXT: &str = "cycle_context";
@@ -458,12 +458,10 @@ fn apply_settlement(c: &Config, s: &mut State, order: &Value, is_buy: bool) -> R
         "settlement intent mismatch"
     );
     let settlement = &order["result"]["settlement"];
-    let source = if s.environment == "live" {
-        "receipt_transfer_logs"
-    } else {
-        "simulated_receipt_transfer_logs"
-    };
-    ensure!(settlement["source"] == source, "settlement source mismatch");
+    ensure!(
+        settlement["source"] == "receipt_transfer_logs",
+        "settlement source mismatch"
+    );
     let sold = crate::strategy_ops::field(settlement, "sold")?;
     let received = crate::strategy_ops::field(settlement, "received")?;
     let (from, to) = c.rules(&expected)?;

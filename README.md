@@ -6,7 +6,7 @@
 
 **描述策略 → 查看 YAML → 按规则执行 → 核对阶段与到账结果。**
 
-当前版本：[v0.3.0](https://github.com/847850277/flow-bnb/releases/tag/v0.3.0) · [WorkBuddy 下载](https://github.com/847850277/flow-bnb/releases/download/v0.3.0/flow-bnb-workbuddy.zip) · [Claude Desktop 下载](https://github.com/847850277/flow-bnb/releases/download/v0.3.0/flow-bnb.mcpb)
+当前版本：[v0.3.1](https://github.com/847850277/flow-bnb/releases/tag/v0.3.1) · [WorkBuddy 下载](https://github.com/847850277/flow-bnb/releases/download/v0.3.1/flow-bnb-workbuddy.zip) · [Claude Desktop 下载](https://github.com/847850277/flow-bnb/releases/download/v0.3.1/flow-bnb.mcpb)
 
 ## 快速开始
 
@@ -19,19 +19,22 @@
 | “查一下 5 USDT 能买多少 AAPLon” | 只读检查和报价 |
 | “用 5 USDT 买入 AAPLon，滑点 0.5%” | 直接启动一次买入并查询到账结果 |
 | “卖出 0.01 AAPLon 换成 USDT，滑点 0.5%” | 直接启动一次卖出并查询到账结果 |
-| “英伟达报价跌 2% 后买入苹果，苹果持仓可卖报价涨 2% 后退出，先模拟” | 生成跨资产 YAML，使用合成报价和回执演示完整流程 |
+| “英伟达报价跌 2% 后买入苹果，苹果持仓可卖报价涨 2% 后退出，保存为 YAML” | 生成并保存跨资产 YAML，按用户要求用脚本持续执行 |
 | “写一个 AAPLon 链上价低于 API 参考价 1% 的买入策略，先试运行” | 生成策略并只读求值，不下单、不启动持续监控 |
 
 执行期间保持客户端和 MCP 运行。钱包配对及客户端自身的工具权限由对应产品处理。
 
-## v0.3.0 新增流程编排
+## v0.3.1 简化策略执行
+
+移除面向用户的模拟回放入口。创建并保存 YAML 后，直接用 `run-cycle.sh` 持续执行；省略 `--execute` 可按真实报价预览条件。自动化测试继续验证阶段衔接和防重复执行，测试夹具不编入运行程序。
+
+## 跨资产流程编排
 
 - **一份 YAML 定义跨资产流程**：观察 NVDAon、买入 AAPLon，再根据本轮持仓的可卖报价退出。
 - **保存执行阶段**：记住启动基准、实际成本和到账数量；重启同一轮可继续，完成后不重复开仓。
 - **脚本负责轮询**：安装包附带 `run-cycle.sh`，循环阶段无需大模型反复推理。
-- **无需钱包的模拟回放**：使用合成数据验证条件、分支和阶段；与真实交易明确区分。
 
-完整提示词和命令见 [跨资产流程演示](docs/linked-stock-cycle-demo.md)。
+完整提示词和命令见 [跨资产流程用法](docs/development.md#跨资产开仓与退出)。
 
 ## 直接交易流程
 
@@ -52,11 +55,11 @@
 
 | 客户端 | 安装方式 |
 | --- | --- |
-| Claude Desktop（macOS） | 导入 [flow-bnb.mcpb](https://github.com/847850277/flow-bnb/releases/download/v0.3.0/flow-bnb.mcpb) |
+| Claude Desktop（macOS） | 导入 [flow-bnb.mcpb](https://github.com/847850277/flow-bnb/releases/download/v0.3.1/flow-bnb.mcpb) |
 | Codex、Claude Code、Cursor、VS Code / Copilot 等 | 运行通用安装器，选择客户端 |
 | 其他本地 stdio MCP 客户端 | 安装器选择 `generic`，导入生成的配置 |
 
-通用安装器：[install-flow-bnb.sh](https://github.com/847850277/flow-bnb/releases/download/v0.3.0/install-flow-bnb.sh) · [macOS .command](https://github.com/847850277/flow-bnb/releases/download/v0.3.0/install-flow-bnb.command)。无需 Rust 或单独安装钱包依赖。
+通用安装器：[install-flow-bnb.sh](https://github.com/847850277/flow-bnb/releases/download/v0.3.1/install-flow-bnb.sh) · [macOS .command](https://github.com/847850277/flow-bnb/releases/download/v0.3.1/install-flow-bnb.command)。无需 Rust 或单独安装钱包依赖。
 
 ```sh
 sh install-flow-bnb.sh --client cursor
@@ -74,11 +77,11 @@ sh install-flow-bnb.sh --client cursor
 | [stock_strategy](flows/stock_strategy.http.yml) | 报价至少获得指定数量的代币时产生交易意图 |
 | [stock_spread_strategy](flows/stock_spread_strategy.http.yml) | 链上价对 API 参考价的偏离达到指定 bp 阈值时产生交易意图 |
 
-参考价场景需要 Web3 API 凭据；官方 `referencePrice` 是由代币价格换算的每股参考价，不能当作独立股票市场行情。计算口径和演示见 [股票参考价偏离监控](docs/stock-spread-demo.md)。
+参考价场景需要 Web3 API 凭据；官方 `referencePrice` 是由代币价格换算的每股参考价，不能当作独立股票市场行情。计算口径见 [自定义策略](docs/development.md#自定义策略)。
 
 每次调用只做一次有时限的策略求值，不会自动开启持续监控或定时交易。DSL、CLI 和可选策略预算的详细用法见 [开发与进阶使用](docs/development.md)。
 
-v0.3.0 的[跨资产循环策略](docs/linked-stock-cycle-demo.md)可以用一份 YAML 定义“NVDAon 报价隐含价格下跌 2% → 买入 AAPLon → 可卖报价比实际成本高 2% 时退出”。引擎保存阶段和实际持仓，外层脚本负责循环调用；提供明确标注的模拟回放。新安装包包含模板、循环命令和轮询脚本。
+[跨资产循环策略](docs/development.md#跨资产开仓与退出)可以用一份 YAML 定义“NVDAon 报价隐含价格下跌 2% → 买入 AAPLon → 可卖报价比实际成本高 2% 时退出”。引擎保存阶段和实际持仓，外层脚本负责循环调用。新安装包包含模板、循环命令和轮询脚本。
 
 ## 交易结果与范围
 
@@ -99,7 +102,7 @@ cargo run --locked -- mcp
 - [flows/](flows/)：工作流模板；[examples/](examples/)：配置与请求样例。
 - [安装包说明](packaging/README.md)：客户端适配、打包和发布流程。
 
-自动化验证覆盖 Rust 测试、安装器测试、11 个 Flow 模板编译和真实安装包的 MCP 协议验收。发布流水线构建 macOS / Linux 的 arm64 与 x64 安装包。跨资产流程使用合成数据验证；各客户端界面验收及该流程的实盘买卖须单独进行。
+自动化验证覆盖 Rust 测试、安装器测试、11 个 Flow 模板编译和真实安装包的 MCP 协议验收。发布流水线构建 macOS / Linux 的 arm64 与 x64 安装包。跨资产执行逻辑使用测试夹具验证；各客户端界面验收及该流程的实盘买卖须单独进行。
 
 ```sh
 cargo fmt --all -- --check

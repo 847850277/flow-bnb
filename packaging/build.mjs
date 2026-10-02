@@ -65,11 +65,11 @@ const json = (file, data) => fs.writeFileSync(path.join(connector, file), JSON.s
 json('connector-meta.json', {
   name: 'Flow BNB', name_zh: 'Flow BNB', name_en: 'Flow BNB',
   description: 'Turn natural language into editable YAML stock-token workflows with persistent execution and settlement tracking.',
-  description_zh: '将自然语言转为可编辑的 YAML 交易流程：跨资产条件、持仓衔接和止盈退出。支持模拟演示、真实交易和到账核对。',
-  description_en: 'Turn natural language into editable YAML workflows with cross-asset conditions, position tracking and exits. Preview with simulation or execute real trades.',
+  description_zh: '将自然语言转为可编辑的 YAML 交易流程：跨资产条件、持仓衔接和止盈退出。支持按条件持续执行、真实交易和到账核对。',
+  description_en: 'Turn natural language into editable YAML workflows with cross-asset conditions, position tracking and exits. Poll saved workflows, execute requested trades and reconcile settlement.',
   source: 'flow-bnb', type: 'mcp', version: pkg.version, minWorkbuddyVersion: '5.0.0',
-  examples_zh: ['创建英伟达报价跌 2% 后买入苹果、持仓可卖报价涨 2% 后退出的 YAML 策略，先模拟演示', '查看这轮策略的阶段、实际到账数量和执行结果'],
-  examples_en: ['Create YAML to buy AAPLon after a 2% NVDAon quote-price drop and exit at a 2% gain; simulate first', 'Show this workflow cycle, received inventory and execution results']
+  examples_zh: ['创建英伟达报价跌 2% 后买入苹果、持仓可卖报价涨 2% 后退出的 YAML 策略，保存后用脚本持续执行', '查看这轮策略的阶段、实际到账数量和执行结果'],
+  examples_en: ['Create YAML to buy AAPLon after a 2% NVDAon quote-price drop and exit at a 2% gain; save it and run it with the polling script', 'Show this workflow cycle, received inventory and execution results']
 });
 json('mcp.json', { preAuth: 'cli', mcpServers: { 'flow-bnb': {
   type: 'stdio', command, args: [...prefix, 'mcp'], runtime: { type: 'node', version: '22' },

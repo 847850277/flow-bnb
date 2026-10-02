@@ -65,8 +65,9 @@ try {
   }
   assert.ok(listed.tools.some(t => t.name === 'execute_bnb_authorized_strategy'));
   assert.ok(listed.tools.some(t => t.name === 'connect_bnb_wallet'));
-  for (const name of ['step_bnb_cycle', 'get_bnb_cycle', 'replay_bnb_cycle'])
+  for (const name of ['step_bnb_cycle', 'get_bnb_cycle'])
     assert.ok(listed.tools.some(t => t.name === name), `missing cycle tool: ${name}`);
+  assert.ok(!listed.tools.some(t => t.name === 'replay_bnb_cycle'));
   const connection = await tool('get_bnb_connection');
   assert.equal(connection.connected, false);
   const generated = await tool('generate_bnb_flow', { template: 'stock_strategy' });
@@ -76,9 +77,9 @@ try {
   assert.equal(read.yaml, generated.canonical_yaml);
   const cycle = await tool('generate_bnb_flow', { template: 'linked_stock_cycle' });
   const cycleFile = await tool('save_bnb_flow', { path: 'flows/cycle-check.http.yml', yaml: cycle.canonical_yaml });
-  const replay = await tool('replay_bnb_cycle', { path: cycleFile.saved_path, expected_sha256: cycleFile.sha256 });
-  assert.equal(replay.mode, 'simulation'); assert.equal(replay.live_transactions, false);
-  assert.equal(replay.final_phase, 'completed'); assert.equal(replay.simulated_orders, 2);
+  const cycleRead = await tool('read_bnb_flow', { path: cycleFile.saved_path });
+  assert.equal(cycleRead.sha256, cycleFile.sha256);
+  assert.equal(cycleRead.yaml, cycle.canonical_yaml);
   assert.ok(fs.existsSync(path.join(env.FLOW_BNB_HOME, 'workspace/flows/stock_strategy.http.yml')));
   assert.ok(!fs.existsSync(path.join(env.FLOW_BNB_HOME, 'workspace/.flow-bnb/agentic.json')));
   const closed = new Promise(resolve => child.once('exit', resolve)); child.stdin.end();

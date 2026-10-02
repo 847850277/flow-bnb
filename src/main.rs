@@ -57,12 +57,6 @@ enum Command {
         #[arg(long)]
         phase_only: bool,
     },
-    /// Run the linked-stock demonstration with synthetic quotes and receipts, no wallet.
-    CycleReplay {
-        file: PathBuf,
-        #[arg(long = "input", value_name = "NAME=VALUE")]
-        inputs: Vec<String>,
-    },
     /// Prepare the private Node runtime for the desktop installer, without wallet access.
     PrepareRuntime {
         #[arg(
@@ -460,11 +454,6 @@ async fn main() -> Result<()> {
             } else {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
-            Ok(())
-        }
-        Command::CycleReplay { file, inputs } => {
-            let result = flow_bnb::cycle::replay(load_strategy(&file, inputs)?).await?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
         Command::StrategyRun {
